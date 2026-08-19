@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check background.js && node --check content.js && node --check control.js && node --check popup.js && node --check caller.mjs",
+    "check": "node --check sidepanel-background.js && node --check background.js && node --check content.js && node --check control.js && node --check popup.js && node --check caller.mjs",
     "test": "node --test",
     "oracle:ask": "node caller.mjs ask"
   }
