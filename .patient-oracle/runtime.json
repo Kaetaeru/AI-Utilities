@@ -1,9 +1,9 @@
 {
   "version": 1,
   "run_id": "po-20260819T192038Z-7c4f9a2e",
-  "revision": 1,
-  "status": "ready",
+  "revision": 2,
+  "status": "complete",
   "request_id": "REQ-E2E-0001",
-  "reason": "queued by Patient Oracle caller",
-  "updated_at": "2026-08-19T19:27:55.407Z"
+  "reason": "response written and verified",
+  "updated_at": "2026-08-19T19:29:20Z"
 }
