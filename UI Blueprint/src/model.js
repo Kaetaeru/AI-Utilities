@@ -1,26 +1,66 @@
-export const SCHEMA_VERSION = 'uib/0.1';
+export const SCHEMA_VERSION = 'uib/0.2';
+
+export const NODE_TYPES = ['frame', 'box', 'button', 'text', 'image'];
 
 const TYPE_DEFAULTS = {
   frame: {
     name: 'Frame',
+    role: '',
     text: '',
-    style: { fill: 'transparent', stroke: '#8b8b95', textColor: '#202124', radius: 8, fontSize: 13, textAlign: 'left' }
+    style: {
+      fill: '#fafbfc', stroke: '#a4a7b0', textColor: '#5c6069', radius: 10,
+      fontSize: 12, fontWeight: 700, lineHeight: 1.25, textAlign: 'left', verticalAlign: 'top',
+      borderWidth: 1, borderStyle: 'dashed', paddingX: 10, paddingY: 8
+    }
   },
   box: {
     name: 'Box',
+    role: '',
     text: 'Label',
-    style: { fill: '#f7f7f8', stroke: '#73737d', textColor: '#202124', radius: 8, fontSize: 14, textAlign: 'center' }
+    style: {
+      fill: '#ffffff', stroke: '#6f7480', textColor: '#202124', radius: 8,
+      fontSize: 14, fontWeight: 500, lineHeight: 1.25, textAlign: 'left', verticalAlign: 'top',
+      borderWidth: 1, borderStyle: 'solid', paddingX: 12, paddingY: 10
+    }
+  },
+  button: {
+    name: 'Button',
+    role: 'action.button',
+    text: 'Button',
+    style: {
+      fill: '#eaf0fb', stroke: '#50698f', textColor: '#1b2a41', radius: 8,
+      fontSize: 14, fontWeight: 600, lineHeight: 1.2, textAlign: 'center', verticalAlign: 'center',
+      borderWidth: 1, borderStyle: 'solid', paddingX: 14, paddingY: 8
+    }
   },
   text: {
     name: 'Text',
+    role: '',
     text: 'Text',
-    style: { fill: 'transparent', stroke: 'transparent', textColor: '#202124', radius: 0, fontSize: 16, textAlign: 'left' }
+    style: {
+      fill: 'transparent', stroke: 'transparent', textColor: '#202124', radius: 0,
+      fontSize: 16, fontWeight: 500, lineHeight: 1.25, textAlign: 'left', verticalAlign: 'top',
+      borderWidth: 0, borderStyle: 'solid', paddingX: 0, paddingY: 0
+    }
   },
   image: {
     name: 'Image',
+    role: '',
     text: 'Image',
-    style: { fill: '#f2f2f4', stroke: '#8b8b95', textColor: '#63636c', radius: 8, fontSize: 13, textAlign: 'center' }
+    style: {
+      fill: '#f2f2f4', stroke: '#8b8b95', textColor: '#63636c', radius: 8,
+      fontSize: 13, fontWeight: 500, lineHeight: 1.25, textAlign: 'center', verticalAlign: 'center',
+      borderWidth: 1, borderStyle: 'solid', paddingX: 10, paddingY: 8
+    }
   }
+};
+
+const DEFAULT_SIZE = {
+  frame: [480, 320],
+  box: [200, 112],
+  button: [144, 44],
+  text: [200, 40],
+  image: [240, 160]
 };
 
 let sequence = 0;
@@ -59,19 +99,21 @@ export function createDocument(options = {}) {
   };
 }
 
-export function createNode(type, bounds, options = {}) {
-  const defaults = TYPE_DEFAULTS[type] || TYPE_DEFAULTS.box;
-  const width = Math.max(1, Math.round(bounds?.width ?? (type === 'text' ? 160 : 180)));
-  const height = Math.max(1, Math.round(bounds?.height ?? (type === 'text' ? 32 : 72)));
+export function createNode(type, bounds = {}, options = {}) {
+  const safeType = NODE_TYPES.includes(type) ? type : 'box';
+  const defaults = TYPE_DEFAULTS[safeType];
+  const [defaultWidth, defaultHeight] = DEFAULT_SIZE[safeType];
+  const width = Math.max(1, Math.round(bounds.width ?? defaultWidth));
+  const height = Math.max(1, Math.round(bounds.height ?? defaultHeight));
   return {
-    id: options.id || createId(type),
-    type,
+    id: options.id || createId(safeType),
+    type: safeType,
     name: options.name || defaults.name,
-    role: options.role || '',
+    role: options.role ?? defaults.role,
     parentId: options.parentId ?? null,
     bounds: {
-      x: Math.round(bounds?.x ?? 0),
-      y: Math.round(bounds?.y ?? 0),
+      x: Math.round(bounds.x ?? 0),
+      y: Math.round(bounds.y ?? 0),
       width,
       height
     },
@@ -105,7 +147,7 @@ export function sanitizeDocument(input) {
   if (!Array.isArray(input.screens)) throw new Error('Blueprint is missing screens[].');
 
   const document = {
-    schema: typeof input.schema === 'string' ? input.schema : SCHEMA_VERSION,
+    schema: SCHEMA_VERSION,
     id: input.id || createId('doc'),
     name: String(input.name || 'Imported Blueprint'),
     createdAt: input.createdAt || new Date().toISOString(),
@@ -126,20 +168,21 @@ export function sanitizeDocument(input) {
   };
 
   if (document.screens.length === 0) document.screens.push(createScreen());
+  document.screens.forEach(reconcileHierarchy);
   return document;
 }
 
 function sanitizeNode(node = {}) {
-  const type = ['frame', 'box', 'text', 'image'].includes(node.type) ? node.type : 'box';
+  const type = NODE_TYPES.includes(node.type) ? node.type : 'box';
   return createNode(type, {
     x: clampNumber(node.bounds?.x, -100000, 100000, 0),
     y: clampNumber(node.bounds?.y, -100000, 100000, 0),
-    width: clampNumber(node.bounds?.width, 1, 100000, 180),
-    height: clampNumber(node.bounds?.height, 1, 100000, 72)
+    width: clampNumber(node.bounds?.width, 1, 100000, DEFAULT_SIZE[type][0]),
+    height: clampNumber(node.bounds?.height, 1, 100000, DEFAULT_SIZE[type][1])
   }, {
     id: node.id || createId(type),
     name: String(node.name || TYPE_DEFAULTS[type].name),
-    role: String(node.role || ''),
+    role: String(node.role ?? TYPE_DEFAULTS[type].role),
     parentId: node.parentId || null,
     text: String(node.text ?? TYPE_DEFAULTS[type].text),
     note: String(node.note || ''),
@@ -159,6 +202,44 @@ export function getActiveScreen(document, screenId) {
 export function updateDocumentTimestamp(document) {
   document.updatedAt = new Date().toISOString();
   return document;
+}
+
+export function boundsContain(outer, inner) {
+  return inner.x >= outer.x && inner.y >= outer.y &&
+    inner.x + inner.width <= outer.x + outer.width &&
+    inner.y + inner.height <= outer.y + outer.height;
+}
+
+export function getDescendantIds(screen, parentId) {
+  const result = [];
+  const queue = [parentId];
+  while (queue.length) {
+    const current = queue.shift();
+    for (const child of screen.nodes.filter((item) => item.parentId === current)) {
+      if (result.includes(child.id)) continue;
+      result.push(child.id);
+      queue.push(child.id);
+    }
+  }
+  return result;
+}
+
+export function findContainingFrame(screen, targetNode) {
+  const targetArea = targetNode.bounds.width * targetNode.bounds.height;
+  return screen.nodes
+    .filter((candidate) => candidate.type === 'frame' && candidate.id !== targetNode.id)
+    .filter((candidate) => candidate.bounds.width * candidate.bounds.height > targetArea)
+    .filter((candidate) => boundsContain(candidate.bounds, targetNode.bounds))
+    .sort((a, b) => (a.bounds.width * a.bounds.height) - (b.bounds.width * b.bounds.height))[0] || null;
+}
+
+export function reconcileHierarchy(screen) {
+  const ordered = [...screen.nodes].sort((a, b) => (a.bounds.width * a.bounds.height) - (b.bounds.width * b.bounds.height));
+  for (const item of ordered) {
+    const parent = findContainingFrame(screen, item);
+    item.parentId = parent?.id || null;
+  }
+  return screen;
 }
 
 export function makeAiHandoff(document, screenId) {
@@ -196,7 +277,7 @@ export function makeAiHandoff(document, screenId) {
   return [
     '# UI Blueprint AI Handoff',
     '',
-    'Recreate this UI faithfully. Treat bounds, text, hierarchy, semantic roles, and notes as authoritative design intent. Preserve the layout first; improve visual polish only where it does not change structure or interaction intent.',
+    'Recreate this UI faithfully. Treat bounds, hierarchy, node type, text, semantic roles, notes, and appearance as authoritative design intent. Frames are containers; preserve their child relationships. Preserve layout first and improve polish only where structure and interaction intent stay unchanged.',
     '',
     '```json',
     JSON.stringify(payload, null, 2),

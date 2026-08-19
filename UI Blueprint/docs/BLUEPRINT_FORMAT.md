@@ -1,62 +1,47 @@
-# UI Blueprint Format `uib/0.1`
+# UI Blueprint Format `uib/0.2`
 
-UI Blueprint documents are JSON. The format is designed as an intermediate representation between a visual sketch, an AI system, and future code exporters.
+UI Blueprint documents are JSON. The format is an intermediate representation between a visual sketch, AI, and future code exporters.
 
-## Core rule
+## Core rules
 
-Visual geometry and semantic meaning are separate:
-
-- `type` says what primitive was drawn.
-- `role` says what the primitive means in the target interface.
-
-A generic `box` can therefore represent a button, card, input, HUD region, product tile, or project-specific concept without changing the core schema.
+- `type` describes the primitive that was drawn.
+- `role` describes what that primitive means in the target interface.
+- `parentId` is structural hierarchy. Frames are containers, not only visual rectangles.
+- bounds are still absolute screen-space pixels in v0.2 for simple editing and fast AI handoff.
 
 ## Document
 
 ```json
 {
-  "schema": "uib/0.1",
+  "schema": "uib/0.2",
   "id": "doc_...",
   "name": "Example",
-  "createdAt": "ISO-8601",
-  "updatedAt": "ISO-8601",
   "screens": [],
   "components": [],
-  "tokens": {
-    "spacing": {},
-    "typography": {},
-    "radius": {},
-    "color": {}
-  },
+  "tokens": {},
   "flows": [],
   "extensions": {}
 }
 ```
 
-`components`, `tokens`, `flows`, and `extensions` are intentionally reserved in v0.1. The editor does not require them to create a useful blueprint.
+Imports from `uib/0.1` are upgraded to the current schema by the editor.
 
-## Screen
+## Primitive types
 
-```json
-{
-  "id": "screen_...",
-  "name": "Dashboard",
-  "platform": "desktop",
-  "width": 1440,
-  "height": 900,
-  "background": "#ffffff",
-  "nodes": []
-}
-```
+- `frame` - structural container / region
+- `box` - generic rectangular UI surface
+- `button` - common action control
+- `text` - standalone text
+- `image` - visual / asset placeholder
 
-`platform` is metadata, not a rendering constraint. Current editor presets include `desktop`, `web`, `mobile`, `tablet`, `game`, and `custom`.
+Dedicated primitives should only be added when they materially reduce repeated ambiguity or editing friction. Domain-specific meaning still belongs in `role`.
 
 ## Node
 
 ```json
 {
-  "id": "box_...",
-  "type": "box",
+  "id": "button_...",
+  "type": "button",
   "name": "Save Button",
   "role": "action.primary",
   "parentId": "frame_...",
@@ -73,88 +58,71 @@ A generic `box` can therefore represent a button, card, input, HUD region, produ
   "layout": null,
   "constraints": null,
   "style": {
-    "fill": "#f7f7f8",
-    "stroke": "#73737d",
-    "textColor": "#202124",
+    "fill": "#eaf0fb",
+    "stroke": "#50698f",
+    "textColor": "#1b2a41",
     "radius": 8,
     "fontSize": 14,
-    "textAlign": "center"
+    "fontWeight": 600,
+    "lineHeight": 1.2,
+    "textAlign": "center",
+    "verticalAlign": "center",
+    "borderWidth": 1,
+    "borderStyle": "solid",
+    "paddingX": 14,
+    "paddingY": 8
   },
   "extensions": {}
 }
 ```
 
-### Primitive types
+## Frame containment
 
-`uib/0.1` uses a deliberately small primitive set:
+The editor derives `parentId` from geometry. A node fully contained by a Frame becomes a child of the smallest containing Frame. Nested Frames are allowed.
 
-- `frame` — semantic region / container
-- `box` — generic labeled rectangular UI object
-- `text` — standalone text
-- `image` — visual/asset placeholder
+Moving a Frame in the editor moves all of its descendants by the same delta. Resizing a Frame does not scale children. If the new geometry no longer contains a child, hierarchy is reconciled after the gesture.
 
-The primitive set should remain small. Domain meaning belongs in `role`.
+The coordinate origin remains the screen, even for children. This keeps handoff explicit and avoids hidden transform math.
 
-## Coordinate model
+## Appearance
 
-In v0.1, node bounds use screen coordinates in pixels. `parentId` expresses semantic hierarchy but does not change the coordinate origin.
+`style` is lightweight visual intent, not a complete CSS model. Current fields are:
 
-This choice keeps early drawing and AI handoff trivial. A future schema version may add local coordinate spaces for reusable components without invalidating the explicit screen-space geometry already stored here.
+- `fill`
+- `stroke`
+- `textColor`
+- `radius`
+- `fontSize`
+- `fontWeight`
+- `lineHeight`
+- `textAlign`
+- `verticalAlign`
+- `borderWidth`
+- `borderStyle`
+- `paddingX`
+- `paddingY`
+
+Consumers should preserve unknown style and extension fields where possible.
 
 ## Role
 
-`role` is an open string namespace. Examples:
+`role` remains an open string namespace. Examples:
 
 ```text
 navigation.topbar
 navigation.sidebar
 content.card
+action.button
 action.primary
 action.destructive
 input.field
 status.metric
-editor.toolbar
 game.character-status
-commerce.product-card
 project.custom-role
 ```
 
 Consumers must not reject unknown roles.
 
-## Note
-
-`note` carries behavior, state, or design intent that geometry cannot express:
-
-```text
-Collapsed until an action is chosen.
-Visible only during initiative.
-This panel should feel quiet and low priority.
-Click opens the full character sheet without leaving the session.
-```
-
-Notes are intentionally free-form because they are primarily human/AI handoff context.
-
-## Future-compatible fields
-
-`layout` and `constraints` are nullable in v0.1. Future versions can describe relationships such as:
-
-```json
-{
-  "layout": {
-    "mode": "row",
-    "gap": 12,
-    "justify": "end",
-    "align": "center"
-  },
-  "constraints": {
-    "horizontal": "stretch",
-    "vertical": "bottom"
-  }
-}
-```
-
-Unknown fields and extension data should be preserved by consumers where possible.
-
 ## AI handoff subset
 
-The editor's **Copy for AI** action intentionally sends only one active screen plus the fields relevant to reproduction. It omits hidden nodes and document editor metadata to reduce token cost and handoff latency.
+Copy for AI sends only the active screen and fields relevant to reproduction. Hidden nodes and editor-only state are omitted to reduce token cost and handoff latency.
