@@ -6,6 +6,7 @@
   const TICK_MS = 2000;
   const STABLE_IDLE_MS = 700;
   const ARTIFACT_RETRY_MS = 5000;
+  const MIN_IDLE_NOTIFY_AFTER_DISPATCH_MS = 3000;
   let port = null;
   let reconnectTimer = null;
   let armedToken = null;
@@ -21,6 +22,7 @@
   let artifactMessageId = null;
   let artifactRetryAt = 0;
   let artifactErrorKey = null;
+  let dispatchConfirmedAtMs = null;
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "PATIENT_ORACLE_PING") {
@@ -79,6 +81,7 @@
       disarm(executionToken);
       throw new Error("Patient Oracle could not confirm prompt submission");
     }
+    dispatchConfirmedAtMs = Date.now();
   }
 
   function fail(code, message) {
@@ -100,6 +103,7 @@
     artifactMessageId = null;
     artifactRetryAt = 0;
     artifactErrorKey = null;
+    dispatchConfirmedAtMs = null;
     checkpointTimer = setTimeout(() => {
       if (armedToken === token) post({ type: "PATIENT_ORACLE_CHECKPOINT_DUE", executionToken: token });
     }, Math.max(0, checkpointMs - Date.now()));
@@ -131,7 +135,8 @@
 
     if (!armedToken) return;
     await tryCaptureResponseArtifact();
-    if (!sawGenerating || approvalVisible || !idle || idleNotified || idleSince === null) return;
+    const dispatchOldEnough = Number.isFinite(dispatchConfirmedAtMs) && Date.now() - dispatchConfirmedAtMs >= MIN_IDLE_NOTIFY_AFTER_DISPATCH_MS;
+    if ((!sawGenerating && !dispatchOldEnough) || approvalVisible || !idle || idleNotified || idleSince === null) return;
     if (Date.now() - idleSince < STABLE_IDLE_MS) return;
     idleNotified = true;
     post({ type: "PATIENT_ORACLE_TURN_IDLE", executionToken: armedToken });
@@ -193,6 +198,7 @@
     artifactMessageId = null;
     artifactRetryAt = 0;
     artifactErrorKey = null;
+    dispatchConfirmedAtMs = null;
     clearTimers();
   }
 
@@ -225,18 +231,36 @@
 
   function findResponseFileCandidate(filename) {
     const wanted = normalizeText(filename).toLowerCase();
-    const nodes = document.querySelectorAll('a[href], a[download], [role="link"][href]');
-    for (const node of nodes) {
-      const labels = [
-        node.getAttribute("download"),
-        node.getAttribute("title"),
-        node.getAttribute("aria-label"),
-        node.textContent,
-        filenameFromUrl(node.getAttribute("href"))
-      ].map((value) => normalizeText(value).toLowerCase()).filter(Boolean);
-      if (labels.some((label) => label === wanted || label.endsWith(`/${wanted}`) || label.includes(wanted))) return node;
+    const selector = [
+      "a[href]", "a[download]", "button", '[role="link"]', '[role="button"]',
+      "[data-download-url]", "[data-file-url]", "[data-url]", "[data-href]",
+      "[data-filename]", "[data-file-name]", "[data-file-id]"
+    ].join(",");
+    for (const node of document.querySelectorAll(selector)) {
+      if (elementMentionsFilename(node, wanted)) return node;
     }
     return null;
+  }
+
+  function elementMentionsFilename(node, wanted) {
+    const labels = [];
+    for (const attr of ["download", "title", "aria-label", "data-filename", "data-file-name", "data-testid"]) {
+      labels.push(node.getAttribute?.(attr));
+    }
+    labels.push(filenameFromUrl(node.getAttribute?.("href")));
+    const ownText = normalizeText(node.textContent);
+    if (ownText && ownText.length <= 1200) labels.push(ownText);
+
+    for (const child of node.querySelectorAll?.('a[href], [download], [data-download-url], [data-file-url], [data-url], [data-href]') || []) {
+      labels.push(child.getAttribute?.("download"), child.getAttribute?.("title"), child.getAttribute?.("aria-label"));
+      labels.push(filenameFromUrl(child.getAttribute?.("href")));
+      if (labels.length > 40) break;
+    }
+
+    return labels
+      .map((value) => normalizeText(value).toLowerCase())
+      .filter(Boolean)
+      .some((label) => label === wanted || label.endsWith(`/${wanted}`) || label.includes(wanted));
   }
 
   async function readFileCandidate(node) {
@@ -270,13 +294,29 @@
         if (!values.includes(resolved)) values.push(resolved);
       } catch {}
     };
-    add(node.getAttribute("href"));
-    for (const attr of ["data-download-url", "data-file-url", "data-url", "data-href"]) add(node.getAttribute(attr));
+    const collect = (element) => {
+      if (!element?.getAttribute) return;
+      add(element.getAttribute("href"));
+      for (const attr of ["data-download-url", "data-file-url", "data-url", "data-href", "data-src"]) add(element.getAttribute(attr));
+      for (const attr of Array.from(element.attributes || [])) {
+        const value = String(attr.value || "").trim();
+        if (/^(?:https?:|blob:|sandbox:|\/(?:backend-api|api|files)\/)/i.test(value)) add(value);
+      }
+    };
+
+    collect(node);
+    for (const child of node.querySelectorAll?.('a[href], [data-download-url], [data-file-url], [data-url], [data-href], [data-src]') || []) {
+      collect(child);
+      if (values.length >= 20) break;
+    }
     let parent = node.parentElement;
-    for (let depth = 0; parent && depth < 4; depth += 1, parent = parent.parentElement) {
-      for (const attr of ["data-download-url", "data-file-url", "data-url", "data-href"]) add(parent.getAttribute(attr));
-      const anchor = parent.querySelector?.("a[href]");
-      if (anchor) add(anchor.getAttribute("href"));
+    for (let depth = 0; parent && depth < 6; depth += 1, parent = parent.parentElement) {
+      collect(parent);
+      for (const child of parent.querySelectorAll?.('a[href], [data-download-url], [data-file-url], [data-url], [data-href], [data-src]') || []) {
+        collect(child);
+        if (values.length >= 20) break;
+      }
+      if (values.length >= 20) break;
     }
     return values;
   }
