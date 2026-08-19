@@ -159,7 +159,38 @@ async function githubError(response, action) {
 }
 
 async function refresh() { try { const snapshot = await request("PATIENT_ORACLE_STATUS"); render(snapshot.state || DEFAULT_STATE); } catch (error) { showError(error); } }
-function render(state) { ui.status.textContent = state.dispatching ? "Dispatching" : state.executing ? (state.lastStatus === "bootstrapping" ? "Bootstrapping" : "Executing") : state.lastStatus || (state.enabled ? "Watching" : "Stopped"); ui.request.textContent = state.currentRequestId || "-"; ui.revision.textContent = Number(state.lastRevision) >= 0 ? String(state.lastRevision) : "-"; ui.dispatches.textContent = String(state.requestDispatchCount || 0); ui.checkpoint.textContent = formatTime(state.checkpointAt); ui.hardstop.textContent = formatTime(state.executionHardStopAt); ui.toggle.textContent = state.enabled ? "Stop Oracle" : "Start Oracle"; ui.save.disabled = Boolean(state.enabled); if (state.lastError) showError(new Error(state.lastError)); else hideError(); }
+function render(state) {
+  ui.status.textContent = displayStatus(state);
+  ui.request.textContent = state.currentRequestId || "-";
+  ui.revision.textContent = Number(state.lastRevision) >= 0 ? String(state.lastRevision) : "-";
+  ui.dispatches.textContent = String(state.requestDispatchCount || 0);
+  ui.checkpoint.textContent = formatTime(state.checkpointAt);
+  ui.hardstop.textContent = formatTime(state.executionHardStopAt);
+  ui.toggle.textContent = state.enabled ? "Stop Oracle" : "Start Oracle";
+  ui.save.disabled = Boolean(state.enabled);
+  if (state.lastError) showError(new Error(state.lastError)); else hideError();
+}
+
+function displayStatus(state) {
+  if (state.dispatching) return "Dispatching";
+  if (state.finalizing) return "Finalizing";
+  if (state.executing) {
+    if (state.lastStatus === "waiting_for_response_file") return "Waiting for response file";
+    if (state.lastStatus === "checkpoint_due") return "Checkpoint due";
+    if (state.lastStatus === "bootstrapping") return "Bootstrapping";
+    return "Executing";
+  }
+  const labels = {
+    waiting_for_empty_composer: "Waiting for empty composer",
+    waiting_for_manual_approval: "Waiting for manual approval",
+    waiting_for_chat_idle: "Waiting for ChatGPT",
+    ready: "Ready",
+    complete: "Complete",
+    needs_user: "Needs user",
+    blocked: "Blocked"
+  };
+  return labels[state.lastStatus] || state.lastStatus || (state.enabled ? "Watching" : "Stopped");
+}
 function request(type, extra = {}) { const requestId = `panel-${Date.now()}-${++counter}`; return new Promise((resolve, reject) => { const timer = setTimeout(() => { pending.delete(requestId); reject(new Error("Patient Oracle request timed out")); }, 25000); pending.set(requestId, { resolve, reject, timer }); port.postMessage({ type, requestId, tabId: tab.id, ...extra }); }); }
 async function run(fn) { ui.save.disabled = true; ui.toggle.disabled = true; hideError(); try { await fn(); } catch (error) { showError(error); } finally { ui.toggle.disabled = false; await refresh(); } }
 async function getActiveChatGptTab() { const [active] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!active?.id || !isChatGptUrl(active.url || "")) throw new Error("Open the Patient Oracle Side Panel from an active ChatGPT tab"); return active; }
