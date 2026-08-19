@@ -5,9 +5,9 @@ import { readFile } from "node:fs/promises";
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 const content = await readFile(new URL("../content.js", import.meta.url), "utf8");
 
-test("composer draft and approval blocks keep Patient Oracle waiting", () => {
+test("composer draft and chat-busy blocks keep Patient Oracle waiting", () => {
   assert.match(background, /waiting_for_empty_composer/);
-  assert.match(background, /waiting_for_github_approval/);
+  assert.match(background, /waiting_for_chat_idle/);
   assert.match(background, /keepOracleWaitingOnRecoverableBlock/);
   assert.match(background, /enabled:\s*true,[\s\S]*dispatching:\s*false,[\s\S]*executing:\s*false/);
 });
