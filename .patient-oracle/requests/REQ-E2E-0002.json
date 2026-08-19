@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "request_id": "REQ-E2E-0002",
+  "prompt": "Return the exact marker PATIENT_ORACLE_FILE_HANDOFF_OK and explain in 2-3 sentences that this result was transported through a generated response file.",
+  "created_at": "2026-08-19T20:02:33.895Z",
+  "response_format": "text/markdown"
+}
