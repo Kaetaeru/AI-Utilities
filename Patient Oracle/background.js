@@ -18,6 +18,7 @@ const PANEL_PORT = "patient-oracle-panel";
 const CONTENT_PORT = "patient-oracle-content";
 const RECOVERY_IDLE_MS = 1500;
 const MIN_EXECUTION_MS = 5000;
+const RECOVERABLE_RETRY_MS = 5000;
 const caches = new Map();
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -135,6 +136,12 @@ async function pollOracle(tabId, { forceFetch = false, trigger = "poll" } = {}) 
   if (!state.enabled || state.dispatching || state.executing) return { action: "none", trigger };
   const pausedUntil = Date.parse(String(state.rateLimitPausedUntil || ""));
   if (Number.isFinite(pausedUntil) && pausedUntil > Date.now()) return { action: "wait", reason: "rate_limit", retryAt: state.rateLimitPausedUntil, trigger };
+  if (isRecoverableWaitingStatus(state.lastStatus)) {
+    const attemptedAt = Date.parse(String(state.lastDispatchAt || ""));
+    if (Number.isFinite(attemptedAt) && Date.now() - attemptedAt < RECOVERABLE_RETRY_MS) {
+      return { action: "wait", reason: state.lastStatus, trigger };
+    }
+  }
   const config = await loadConfig(tabId);
   let runtime;
   try {
@@ -175,8 +182,10 @@ async function bootstrapOracle(tabId, config) {
   await updateState(tabId, { enabled: true, dispatching: true, executing: false, executionToken, executionStartedAt: budget.startedAt, checkpointAt: budget.checkpointAt, executionHardStopAt: budget.hardStopAt, lastStatus: "bootstrapping", lastDispatchAt: new Date().toISOString() });
   try {
     const response = await chrome.tabs.sendMessage(tabId, { type: "PATIENT_ORACLE_PROMPT", prompt, executionToken, checkpointAt: budget.checkpointAt, hardStopAt: budget.hardStopAt });
-    if (!response?.sent) throw new Error(response?.error || "Patient Oracle bootstrap prompt was not dispatched");
+    if (!response?.sent) throw dispatchResponseError(response, "Patient Oracle bootstrap prompt was not dispatched");
   } catch (error) {
+    const waiting = await keepOracleWaitingOnRecoverableBlock(tabId, error);
+    if (waiting) return waiting;
     await stopOracle(tabId, "bootstrap_send_failed");
     await updateState(tabId, { lastError: error instanceof Error ? error.message : String(error) });
     throw error;
@@ -197,14 +206,70 @@ async function dispatchRequest(tabId, runtime, config, nextCount, trigger) {
     await waitForTabComplete(tabId, 20000);
     await ensureContentScript(tabId);
     const response = await chrome.tabs.sendMessage(tabId, { type: "PATIENT_ORACLE_PROMPT", prompt, executionToken, checkpointAt: budget.checkpointAt, hardStopAt: budget.hardStopAt });
-    if (!response?.sent) throw new Error(response?.error || "Patient Oracle prompt was not dispatched");
+    if (!response?.sent) throw dispatchResponseError(response, "Patient Oracle prompt was not dispatched");
   } catch (error) {
+    const waiting = await keepOracleWaitingOnRecoverableBlock(tabId, error);
+    if (waiting) return waiting;
     await stopOracle(tabId, "dispatch_failed");
     await updateState(tabId, { lastError: error instanceof Error ? error.message : String(error) });
     throw error;
   }
   await updateState(tabId, { dispatching: false, executing: true, executionToken, executionStartedAt: budget.startedAt, checkpointAt: budget.checkpointAt, executionHardStopAt: budget.hardStopAt, lastDispatchedRevision: runtime.revision, currentRequestId: runtime.requestId, requestDispatchCount: nextCount, lastDispatchAt: new Date().toISOString(), lastStatus: "executing" });
   return { action: "dispatched", requestId: runtime.requestId, revision: runtime.revision, executionToken, trigger };
+}
+
+function dispatchResponseError(response, fallback) {
+  const error = new Error(response?.error || fallback);
+  error.code = String(response?.code || "");
+  return error;
+}
+
+function classifyRecoverableDispatchBlock(error) {
+  const code = String(error?.code || "");
+  const message = String(error?.message || error || "");
+  if (code === "composer_not_empty" || /composer is not empty|user draft is protected/i.test(message)) {
+    return {
+      status: "waiting_for_empty_composer",
+      reason: "User draft is protected. Clear or send the draft; Patient Oracle will retry automatically."
+    };
+  }
+  if (code === "approval_pending" || /GitHub approval is pending/i.test(message)) {
+    return {
+      status: "waiting_for_github_approval",
+      reason: "GitHub approval is pending. Approve it manually or change the GitHub app permission in ChatGPT settings."
+    };
+  }
+  if (code === "chat_busy" || /still generating/i.test(message)) {
+    return {
+      status: "waiting_for_chat_idle",
+      reason: "ChatGPT is still generating. Patient Oracle will retry when the tab is idle."
+    };
+  }
+  return null;
+}
+
+async function keepOracleWaitingOnRecoverableBlock(tabId, error) {
+  const block = classifyRecoverableDispatchBlock(error);
+  if (!block) return null;
+  await updateState(tabId, {
+    enabled: true,
+    dispatching: false,
+    executing: false,
+    executionToken: null,
+    executionStartedAt: null,
+    checkpointAt: null,
+    executionHardStopAt: null,
+    lastDispatchAt: new Date().toISOString(),
+    lastStatus: block.status,
+    lastReason: block.reason,
+    stopReason: null,
+    lastError: null
+  });
+  return { action: "wait", reason: block.status };
+}
+
+function isRecoverableWaitingStatus(value) {
+  return ["waiting_for_empty_composer", "waiting_for_github_approval", "waiting_for_chat_idle"].includes(String(value || ""));
 }
 
 async function fetchRuntime(tabId, config, forceFetch) {
@@ -257,18 +322,139 @@ function contentsUrl(config, path) {
   url.searchParams.set("ref", config.branch);
   return url.toString();
 }
-function githubHeaders(token, accept = "application/vnd.github+json") { const headers = { Accept: accept, "X-GitHub-Api-Version": "2022-11-28" }; if (token) headers.Authorization = `Bearer ${token}`; return headers; }
-async function recordRateLimit(tabId, response) { const remaining = Number(response.headers.get("x-ratelimit-remaining")); const reset = Number(response.headers.get("x-ratelimit-reset")); await updateState(tabId, { lastCheckedAt: new Date().toISOString(), rateLimitRemaining: Number.isFinite(remaining) ? remaining : null, rateLimitResetAt: Number.isFinite(reset) ? new Date(reset * 1000).toISOString() : null }); }
-async function pauseForRateLimitIfNeeded(tabId, response) { if (![403,429].includes(response.status)) return; const now = Date.now(); const retryAfter = Number(response.headers.get("retry-after")); const reset = Number(response.headers.get("x-ratelimit-reset")); let until = Number.isFinite(retryAfter) && retryAfter > 0 ? now + retryAfter * 1000 : null; if (until === null && response.headers.get("x-ratelimit-remaining") === "0" && Number.isFinite(reset)) until = Math.max(now + 1000, reset * 1000); if (until === null && response.status === 429) until = now + 60000; if (until === null) return; await updateState(tabId, { rateLimitPausedUntil: new Date(until).toISOString(), lastError: null }); const error = new Error("Patient Oracle GitHub polling paused for rate limiting"); error.name = "PatientOracleRateLimitPause"; error.untilMs = until; throw error; }
-function cacheFor(config) { const key = streamKey(config); if (!caches.has(key)) caches.set(key, { etag: null, runtime: null, lastFetchAt: 0 }); return caches.get(key); }
-function effectivePollMs(config) { const requested = Number(config.pollIntervalSeconds); return Math.max(config.githubToken ? 5 : 90, Number.isFinite(requested) ? Math.floor(requested) : 90) * 1000; }
-async function loadConfig(tabId) { const stored = await chrome.storage.local.get(configKey(tabId)); return normalizeConfig({ ...DEFAULT_CONFIG, ...(stored[configKey(tabId)] || {}) }); }
-async function loadState(tabId) { const stored = await chrome.storage.local.get(stateKey(tabId)); return { ...DEFAULT_STATE, ...(stored[stateKey(tabId)] || {}) }; }
-async function updateState(tabId, patch) { const next = { ...await loadState(tabId), ...patch }; await chrome.storage.local.set({ [stateKey(tabId)]: next }); return next; }
-function normalizeConfig(value) { const poll = Number(value?.pollIntervalSeconds); return { owner: String(value?.owner || "").trim(), repo: String(value?.repo || "").trim(), branch: String(value?.branch || "main").trim() || "main", githubToken: String(value?.githubToken || "").trim(), path: String(value?.path || DEFAULT_CONFIG.path).replace(/^\/+/, "").trim() || DEFAULT_CONFIG.path, pollIntervalSeconds: Number.isFinite(poll) ? Math.max(5, Math.floor(poll)) : DEFAULT_CONFIG.pollIntervalSeconds, maxRedispatchesPerRequest: normalizeMaxRedispatches(value?.maxRedispatchesPerRequest) }; }
-async function findConflictingOwner(tabId, config) { const all = await chrome.storage.local.get(null); const wanted = streamKey(config); for (const [key, value] of Object.entries(all)) { if (!key.startsWith("patientOracleState:") || !value?.enabled) continue; const otherTabId = Number(key.slice("patientOracleState:".length)); if (!Number.isSafeInteger(otherTabId) || otherTabId === tabId) continue; const otherConfig = normalizeConfig(all[configKey(otherTabId)] || {}); if (streamKey(otherConfig) === wanted) return otherTabId; } return null; }
-async function ensureContentScript(tabId) { try { const ping = await chrome.tabs.sendMessage(tabId, { type: "PATIENT_ORACLE_PING" }); if (ping?.ready) return; } catch {} await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] }); const ping = await chrome.tabs.sendMessage(tabId, { type: "PATIENT_ORACLE_PING" }); if (!ping?.ready) throw new Error("Patient Oracle content script injection failed"); }
-function waitForTabComplete(tabId, timeoutMs) { return new Promise((resolve, reject) => { let timer = null; const done = () => { if (timer) clearTimeout(timer); chrome.tabs.onUpdated.removeListener(onUpdated); resolve(); }; const onUpdated = (updatedTabId, changeInfo) => { if (updatedTabId === tabId && changeInfo.status === "complete") done(); }; chrome.tabs.onUpdated.addListener(onUpdated); chrome.tabs.get(tabId).then((tab) => { if (tab.status === "complete") done(); }).catch(() => {}); timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(onUpdated); reject(new Error("Timed out waiting for fresh ChatGPT conversation")); }, timeoutMs); }); }
-function isMissingRuntimeError(error) { return Number(error?.status) === 404 || /HTTP 404|runtime.*not found|not found/i.test(String(error?.message || error || "")); }
-function normalizeTabId(tabId) { const value = Number(tabId); if (!Number.isSafeInteger(value) || value < 0) throw new Error("A valid ChatGPT tab ID is required"); return value; }
-function isChatGptUrl(url) { try { const host = new URL(url).hostname; return host === "chatgpt.com" || host === "chat.openai.com"; } catch { return false; } }
+
+function githubHeaders(token, accept = "application/vnd.github+json") {
+  const headers = { Accept: accept, "X-GitHub-Api-Version": "2022-11-28" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+async function recordRateLimit(tabId, response) {
+  const remaining = Number(response.headers.get("x-ratelimit-remaining"));
+  const reset = Number(response.headers.get("x-ratelimit-reset"));
+  await updateState(tabId, {
+    lastCheckedAt: new Date().toISOString(),
+    rateLimitRemaining: Number.isFinite(remaining) ? remaining : null,
+    rateLimitResetAt: Number.isFinite(reset) ? new Date(reset * 1000).toISOString() : null
+  });
+}
+
+async function pauseForRateLimitIfNeeded(tabId, response) {
+  if (![403, 429].includes(response.status)) return;
+  const now = Date.now();
+  const retryAfter = Number(response.headers.get("retry-after"));
+  const reset = Number(response.headers.get("x-ratelimit-reset"));
+  let until = Number.isFinite(retryAfter) && retryAfter > 0 ? now + retryAfter * 1000 : null;
+  if (until === null && response.headers.get("x-ratelimit-remaining") === "0" && Number.isFinite(reset)) until = Math.max(now + 1000, reset * 1000);
+  if (until === null && response.status === 429) until = now + 60000;
+  if (until === null) return;
+  await updateState(tabId, { rateLimitPausedUntil: new Date(until).toISOString(), lastError: null });
+  const error = new Error("Patient Oracle GitHub polling paused for rate limiting");
+  error.name = "PatientOracleRateLimitPause";
+  error.untilMs = until;
+  throw error;
+}
+
+function cacheFor(config) {
+  const key = streamKey(config);
+  if (!caches.has(key)) caches.set(key, { etag: null, runtime: null, lastFetchAt: 0 });
+  return caches.get(key);
+}
+
+function effectivePollMs(config) {
+  const requested = Number(config.pollIntervalSeconds);
+  return Math.max(config.githubToken ? 5 : 90, Number.isFinite(requested) ? Math.floor(requested) : 90) * 1000;
+}
+
+async function loadConfig(tabId) {
+  const stored = await chrome.storage.local.get(configKey(tabId));
+  return normalizeConfig({ ...DEFAULT_CONFIG, ...(stored[configKey(tabId)] || {}) });
+}
+
+async function loadState(tabId) {
+  const stored = await chrome.storage.local.get(stateKey(tabId));
+  return { ...DEFAULT_STATE, ...(stored[stateKey(tabId)] || {}) };
+}
+
+async function updateState(tabId, patch) {
+  const next = { ...await loadState(tabId), ...patch };
+  await chrome.storage.local.set({ [stateKey(tabId)]: next });
+  return next;
+}
+
+function normalizeConfig(value) {
+  const poll = Number(value?.pollIntervalSeconds);
+  return {
+    owner: String(value?.owner || "").trim(),
+    repo: String(value?.repo || "").trim(),
+    branch: String(value?.branch || "main").trim() || "main",
+    githubToken: String(value?.githubToken || "").trim(),
+    path: String(value?.path || DEFAULT_CONFIG.path).replace(/^\/+/, "").trim() || DEFAULT_CONFIG.path,
+    pollIntervalSeconds: Number.isFinite(poll) ? Math.max(5, Math.floor(poll)) : DEFAULT_CONFIG.pollIntervalSeconds,
+    maxRedispatchesPerRequest: normalizeMaxRedispatches(value?.maxRedispatchesPerRequest)
+  };
+}
+
+async function findConflictingOwner(tabId, config) {
+  const all = await chrome.storage.local.get(null);
+  const wanted = streamKey(config);
+  for (const [key, value] of Object.entries(all)) {
+    if (!key.startsWith("patientOracleState:") || !value?.enabled) continue;
+    const otherTabId = Number(key.slice("patientOracleState:".length));
+    if (!Number.isSafeInteger(otherTabId) || otherTabId === tabId) continue;
+    const otherConfig = normalizeConfig(all[configKey(otherTabId)] || {});
+    if (streamKey(otherConfig) === wanted) return otherTabId;
+  }
+  return null;
+}
+
+async function ensureContentScript(tabId) {
+  try {
+    const ping = await chrome.tabs.sendMessage(tabId, { type: "PATIENT_ORACLE_PING" });
+    if (ping?.ready) return;
+  } catch {}
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+  const ping = await chrome.tabs.sendMessage(tabId, { type: "PATIENT_ORACLE_PING" });
+  if (!ping?.ready) throw new Error("Patient Oracle content script injection failed");
+}
+
+function waitForTabComplete(tabId, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let timer = null;
+    const done = () => {
+      if (timer) clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve();
+    };
+    const onUpdated = (updatedTabId, changeInfo) => {
+      if (updatedTabId === tabId && changeInfo.status === "complete") done();
+    };
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.get(tabId).then((tab) => {
+      if (tab.status === "complete") done();
+    }).catch(() => {});
+    timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      reject(new Error("Timed out waiting for fresh ChatGPT conversation"));
+    }, timeoutMs);
+  });
+}
+
+function isMissingRuntimeError(error) {
+  return Number(error?.status) === 404 || /HTTP 404|runtime.*not found|not found/i.test(String(error?.message || error || ""));
+}
+
+function normalizeTabId(tabId) {
+  const value = Number(tabId);
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error("A valid ChatGPT tab ID is required");
+  return value;
+}
+
+function isChatGptUrl(url) {
+  try {
+    const host = new URL(url).hostname;
+    return host === "chatgpt.com" || host === "chat.openai.com";
+  } catch {
+    return false;
+  }
+}
