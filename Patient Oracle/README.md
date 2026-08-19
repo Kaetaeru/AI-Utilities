@@ -8,11 +8,12 @@ This utility is intentionally independent from the Rerun extension. The Rerun pr
 
 ## Files
 
-- `manifest.json` — standalone Manifest V3 extension.
+- `manifest.json` — standalone Manifest V3 extension using a persistent Chrome Side Panel.
+- `sidepanel-background.js` — opens the Side Panel from the toolbar action and loads the scheduler worker.
 - `background.js` — GitHub scheduler, bootstrap, revision/rate-limit safety, fresh-chat dispatch.
 - `content.js` — safe ChatGPT composer submission and lifecycle observation; never scrapes answer text.
 - `control.js` — strict protocol parsing, identities, prompts, and 18/20-minute execution budget.
-- `popup.html` / `popup.js` — independent Patient Oracle controls.
+- `popup.html` / `popup.js` — persistent Side Panel controls (the filenames are retained for compatibility; they are no longer used as a popup).
 - `caller.mjs` — external GitHub-only request publisher and response waiter.
 - `CONTRACT.md` — durable protocol copied into target repositories during bootstrap.
 
@@ -29,7 +30,7 @@ npm test
 
 Then open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select the `AI-Utilities/Patient Oracle/` directory.
 
-Open a ChatGPT tab, open Patient Oracle from the Chrome toolbar, configure the GitHub owner/repository/branch and optional token, then click **Start Oracle**.
+Open a ChatGPT tab and click the Patient Oracle toolbar icon. Chrome opens Patient Oracle in the **Side Panel**, which remains available while you click and work elsewhere in the page. Configure the GitHub owner/repository/branch and optional token, then click **Start Oracle**.
 
 For external requests:
 
