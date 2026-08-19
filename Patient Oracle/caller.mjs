@@ -10,7 +10,7 @@ main().catch((error) => {
 });
 
 async function main() {
-  if (!["enqueue", "wait", "ask"].includes(command)) throw new Error("Usage: caller.mjs <enqueue|wait|ask> --owner OWNER --repo REPO [--branch BRANCH] [--prompt TEXT] [--id REQUEST_ID]");
+  if (!["enqueue", "wait", "ask"].includes(command)) throw new Error("Usage: caller.mjs <enqueue|wait|ask> --owner OWNER --repo REPO [--branch BRANCH] [--prompt TEXT] [--id REQUEST_ID] [--response-format FORMAT]");
   const context = {
     owner: required("owner"),
     repo: required("repo"),
@@ -32,7 +32,13 @@ async function enqueue(context) {
   if (runtime.status !== "complete") throw new Error(`runtime status is ${runtime.status}; only complete accepts a new request`);
   const requestPath = `.patient-oracle/requests/${requestId}.json`;
   if (await getFile(context, requestPath, true)) throw new Error(`request ${requestId} already exists`);
-  const request = { version: 1, request_id: requestId, prompt, created_at: new Date().toISOString() };
+  const request = {
+    version: 1,
+    request_id: requestId,
+    prompt,
+    created_at: new Date().toISOString(),
+    ...(args["response-format"] ? { response_format: String(args["response-format"]) } : {})
+  };
   await putFile(context, requestPath, request, `patient-oracle: enqueue ${requestId}`);
   const nextRuntime = {
     version: 1,
@@ -63,8 +69,8 @@ async function wait(context, requestIdInput) {
     if (responseFile) {
       const response = parseResponse(responseFile.text, requestId);
       return response.status === "complete"
-        ? { request_id: requestId, status: "complete", answer: response.answer, completed_at: response.completed_at }
-        : { request_id: requestId, status: response.status, reason: response.reason };
+        ? { request_id: requestId, status: "complete", content_type: response.content_type, answer: response.answer, completed_at: response.completed_at, ...(response.metadata ? { metadata: response.metadata } : {}) }
+        : { request_id: requestId, status: response.status, reason: response.reason, completed_at: response.completed_at };
     }
     const runtime = parseRuntime((await getFile(context, RUNTIME_PATH)).text);
     if (runtime.request_id === requestId && ["needs_user", "blocked"].includes(runtime.status)) return { request_id: requestId, status: runtime.status, reason: runtime.reason || "Patient Oracle requires intervention" };
@@ -99,10 +105,16 @@ function parseRuntime(text) {
 
 function parseResponse(text, requestId) {
   const value = parseObject(text, "response");
-  rejectUnknown(value, ["version","request_id","status","answer","reason","completed_at","metadata"], "response");
+  rejectUnknown(value, ["version","request_id","status","content_type","answer","reason","completed_at","metadata"], "response");
   if (value.version !== 1 || value.request_id !== requestId || !["complete","needs_user","blocked"].includes(value.status)) throw new Error("invalid response identity or status");
-  if (value.status === "complete" && !String(value.answer || "").trim()) throw new Error("complete response requires answer");
-  if (value.status !== "complete" && !String(value.reason || "").trim()) throw new Error(`${value.status} response requires reason`);
+  if (typeof value.completed_at !== "string" || !Number.isFinite(Date.parse(value.completed_at))) throw new Error("response completed_at must be ISO-8601");
+  if (value.metadata !== undefined && (!value.metadata || typeof value.metadata !== "object" || Array.isArray(value.metadata))) throw new Error("response metadata must be an object");
+  if (value.status === "complete") {
+    if (!String(value.answer || "").trim()) throw new Error("complete response requires answer");
+    if (!String(value.content_type || "").trim()) throw new Error("complete response requires content_type");
+  } else if (!String(value.reason || "").trim()) {
+    throw new Error(`${value.status} response requires reason`);
+  }
   return value;
 }
 
