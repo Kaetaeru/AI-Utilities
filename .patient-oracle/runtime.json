@@ -1,9 +1,9 @@
 {
   "version": 1,
   "run_id": "po-20260819T192038Z-7c4f9a2e",
-  "revision": 6,
+  "revision": 7,
   "status": "ready",
   "request_id": "REQ-E2E-0002",
   "reason": "manual retry requested after interrupted local execution",
-  "updated_at": "2026-08-19T20:16:46.851Z"
+  "updated_at": "2026-08-19T20:22:05.373Z"
 }
