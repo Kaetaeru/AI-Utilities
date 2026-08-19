@@ -2,6 +2,7 @@ export const ORACLE_RUNTIME_PATH = ".patient-oracle/runtime.json";
 export const ORACLE_CONTRACT_PATH = ".patient-oracle/CONTRACT.md";
 export const ORACLE_STATUSES = new Set(["ready", "complete", "needs_user", "blocked"]);
 export const ORACLE_TERMINAL_STATUSES = new Set(["complete", "needs_user", "blocked"]);
+export const HANDOFF_STATUSES = new Set(["complete", "needs_user", "blocked", "continue"]);
 
 export const DEFAULT_CONFIG = Object.freeze({
   owner: "",
@@ -18,6 +19,7 @@ export const DEFAULT_STATE = Object.freeze({
   streamKey: null,
   dispatching: false,
   executing: false,
+  finalizing: false,
   executionToken: null,
   executionStartedAt: null,
   executionHardStopAt: null,
@@ -27,6 +29,7 @@ export const DEFAULT_STATE = Object.freeze({
   lastDispatchedRevision: -1,
   currentRequestId: null,
   requestDispatchCount: 0,
+  expectedResponseFilename: null,
   lastStatus: null,
   lastReason: null,
   lastCheckedAt: null,
@@ -49,17 +52,9 @@ export function stateKey(tabId) {
 
 export function parseRuntimePayload(text) {
   let value;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    throw new Error("oracle runtime is not valid JSON");
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("oracle runtime must contain a JSON object");
-  }
-  const allowedKeys = new Set(["version", "run_id", "revision", "status", "request_id", "reason", "updated_at"]);
-  const unknownKeys = Object.keys(value).filter((key) => !allowedKeys.has(key));
-  if (unknownKeys.length) throw new Error(`oracle runtime contains unsupported fields: ${unknownKeys.join(", ")}`);
+  try { value = JSON.parse(text); } catch { throw new Error("oracle runtime is not valid JSON"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("oracle runtime must contain a JSON object");
+  rejectUnknown(value, ["version", "run_id", "revision", "status", "request_id", "reason", "updated_at"], "oracle runtime");
   if (value.version !== 1) throw new Error("oracle runtime version must be 1");
   if (typeof value.run_id !== "string" || !value.run_id.trim()) throw new Error("oracle runtime run_id must be a non-empty string");
   if (!Number.isSafeInteger(value.revision) || value.revision < 0) throw new Error("oracle runtime revision must be a non-negative integer");
@@ -82,15 +77,9 @@ export function parseRuntimePayload(text) {
 
 export function parseRequestPayload(text) {
   let value;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    throw new Error("oracle request is not valid JSON");
-  }
+  try { value = JSON.parse(text); } catch { throw new Error("oracle request is not valid JSON"); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("oracle request must contain a JSON object");
-  const allowedKeys = new Set(["version", "request_id", "prompt", "created_at", "response_format", "metadata"]);
-  const unknownKeys = Object.keys(value).filter((key) => !allowedKeys.has(key));
-  if (unknownKeys.length) throw new Error(`oracle request contains unsupported fields: ${unknownKeys.join(", ")}`);
+  rejectUnknown(value, ["version", "request_id", "prompt", "created_at", "response_format", "metadata"], "oracle request");
   if (value.version !== 1) throw new Error("oracle request version must be 1");
   if (typeof value.request_id !== "string" || !value.request_id.trim()) throw new Error("oracle request request_id must be a non-empty string");
   if (typeof value.prompt !== "string" || !value.prompt.trim()) throw new Error("oracle request prompt must be a non-empty string");
@@ -107,6 +96,35 @@ export function parseRequestPayload(text) {
   };
 }
 
+export function parseResponseArtifact(text, expectedRequestId) {
+  let value;
+  try { value = JSON.parse(text); } catch { throw new Error("Patient Oracle response artifact is not valid JSON"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Patient Oracle response artifact must be a JSON object");
+  rejectUnknown(value, ["version", "request_id", "status", "content_type", "answer", "reason", "resume_state", "completed_at", "metadata"], "response artifact");
+  if (value.version !== 1) throw new Error("response artifact version must be 1");
+  if (typeof value.request_id !== "string" || value.request_id.trim() !== String(expectedRequestId || "").trim()) throw new Error("response artifact request_id mismatch");
+  if (!HANDOFF_STATUSES.has(value.status)) throw new Error(`unsupported response artifact status: ${String(value.status)}`);
+  if (value.content_type !== undefined && (typeof value.content_type !== "string" || !value.content_type.trim())) throw new Error("response artifact content_type must be a non-empty string when present");
+  if (value.answer !== undefined && typeof value.answer !== "string") throw new Error("response artifact answer must be a string when present");
+  if (value.reason !== undefined && typeof value.reason !== "string") throw new Error("response artifact reason must be a string when present");
+  if (value.completed_at !== undefined && (typeof value.completed_at !== "string" || !Number.isFinite(Date.parse(value.completed_at)))) throw new Error("response artifact completed_at must be ISO-8601 when present");
+  if (value.metadata !== undefined && (!value.metadata || typeof value.metadata !== "object" || Array.isArray(value.metadata))) throw new Error("response artifact metadata must be an object when present");
+  if (value.status === "complete" && !String(value.answer || "").trim()) throw new Error("complete response artifact requires a non-empty answer");
+  if (["needs_user", "blocked"].includes(value.status) && !String(value.reason || "").trim()) throw new Error(`${value.status} response artifact requires reason`);
+  if (value.status === "continue" && (!String(value.reason || "").trim() || value.resume_state === undefined || value.resume_state === null)) throw new Error("continue response artifact requires reason and resume_state");
+  return {
+    version: 1,
+    requestId: value.request_id.trim(),
+    status: value.status,
+    contentType: String(value.content_type || "text/markdown").trim(),
+    answer: typeof value.answer === "string" ? value.answer : "",
+    reason: typeof value.reason === "string" ? value.reason : "",
+    resumeState: value.resume_state ?? null,
+    completedAt: typeof value.completed_at === "string" ? value.completed_at : "",
+    metadata: value.metadata || null
+  };
+}
+
 export function normalizeMaxRedispatches(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return DEFAULT_CONFIG.maxRedispatchesPerRequest;
@@ -114,58 +132,69 @@ export function normalizeMaxRedispatches(value) {
 }
 
 export function createExecutionBudget(nowMs = Date.now()) {
-  const checkpointMs = nowMs + 18 * 60 * 1000;
-  const hardStopMs = nowMs + 20 * 60 * 1000;
   return {
     startedAt: new Date(nowMs).toISOString(),
-    checkpointAt: new Date(checkpointMs).toISOString(),
-    hardStopAt: new Date(hardStopMs).toISOString()
+    checkpointAt: new Date(nowMs + 18 * 60 * 1000).toISOString(),
+    hardStopAt: new Date(nowMs + 20 * 60 * 1000).toISOString()
   };
 }
 
-export function buildWorkerPrompt(runtime, request, config, budget) {
-  const requestPath = `.patient-oracle/requests/${request.requestId}.json`;
-  const responsePath = `.patient-oracle/responses/${request.requestId}.json`;
-  return [
-    "You are the Patient Oracle worker. Treat this ChatGPT conversation as disposable execution state; GitHub is the only durable source of truth.",
-    `Target GitHub repository: ${config.owner}/${config.repo}, branch ${config.branch || "main"}.`,
-    `Runtime: ${config.path}; run_id=${runtime.runId}; revision=${runtime.revision}; request_id=${runtime.requestId}.`,
-    `Read ${ORACLE_CONTRACT_PATH}, then ${config.path}, then ${requestPath}. If current GitHub state differs from this prompt, GitHub is authoritative.`,
-    `Write the durable result to ${responsePath}. The extension will not scrape your assistant answer from the DOM.`,
-    "For success, write response JSON first, verify it exists, then update runtime.json last with a higher revision and status complete for the same request_id.",
-    "If human input or manual permission is required, write durable reason/state and publish needs_user. If safe progress is impossible, publish blocked.",
-    `Execution started at ${budget.startedAt}. The 18-minute checkpoint begins at ${budget.checkpointAt}. Hard stop is before ${budget.hardStopAt}.`,
-    "At the checkpoint, begin no new long operations. If incomplete, preserve the same request identity, publish a higher ready revision for continuation, and end before 20 minutes.",
-    "Never click or attempt to bypass GitHub approval/OAuth/admin controls. If ChatGPT presents an approval decision, wait for the user.",
-    "Do not invent repository state, test results, citations, or completed writes. Verify before declaring complete."
-  ].join(" ");
+export function responseFilename(requestId) {
+  const id = normalizeRequestId(requestId);
+  return `patient-oracle-response-${id}.json`;
 }
 
-export function buildBootstrapPrompt(config, budget) {
+export function buildWorkerPrompt(runtime, request, budget, resumeState = null) {
+  const filename = responseFilename(request.requestId);
+  const formatHint = request.responseFormat ? `Requested response format hint: ${request.responseFormat}.` : "Default to Markdown for prose answers.";
+  const resume = resumeState === null ? "" : `\nContinuation state from the previous turn:\n${JSON.stringify(resumeState)}`;
   return [
-    "Initialize the Patient Oracle protocol in the connected GitHub repository.",
-    `Target repository: ${config.owner}/${config.repo}, branch ${config.branch || "main"}.`,
-    `Create ${ORACLE_CONTRACT_PATH} and ${config.path}. Do not create a fake user request.`,
-    "The contract must state that GitHub is the only durable source of truth; requests live under .patient-oracle/requests/<request_id>.json; responses live under .patient-oracle/responses/<request_id>.json; runtime.json is the final authoritative handoff write; revision is monotonic; assistant DOM text is never the durable response channel.",
-    "Preserve safety invariants: one owner per stream, no revision regression, no duplicate revision dispatch, execution-token matching, bounded redispatch, protect non-empty user composer text, require visible submission evidence, never auto-click GitHub approval/OAuth/admin controls, pause on GitHub rate limits, use DOM completion only as a wake signal, keep polling as recovery, and stop on repository-coordinate changes.",
-    "The contract must include the 20-minute execution law: checkpoint around minute 18, begin no new long work after the checkpoint, persist exact resumable state, never claim incomplete work complete, publish a higher ready revision for the same request when continuation is required, and end before 20 minutes.",
-    `Initialize ${config.path} last as strict JSON with exactly version, run_id, revision, status, reason, updated_at. Use version 1, a new non-empty run_id, revision 0, status complete, reason \"initialized; waiting for caller request\", and a current ISO-8601 updated_at.`,
-    "Verify both GitHub writes. Do not invent successful writes or repository state.",
-    `This bootstrap turn started at ${budget.startedAt}; checkpoint at ${budget.checkpointAt}; hard stop before ${budget.hardStopAt}.`,
-    "If GitHub requires manual approval, wait. Never click or bypass the approval yourself."
-  ].join(" ");
+    "You are the Patient Oracle worker in a disposable ChatGPT conversation.",
+    "Do not use GitHub, GitHub plugins, connectors, OAuth, or repository tools in this turn. The browser extension is the only GitHub reader/writer.",
+    `Request identity: run_id=${runtime.runId}; revision=${runtime.revision}; request_id=${request.requestId}.`,
+    `Execution started at ${budget.startedAt}. Checkpoint is ${budget.checkpointAt}. Hard stop is before ${budget.hardStopAt}.`,
+    "At the checkpoint begin no new long work. If the request cannot finish safely, preserve exact resumable state instead of pretending completion.",
+    `The only machine-readable handoff is a generated downloadable UTF-8 JSON file named exactly ${filename}.`,
+    "Do not rely on ordinary assistant message text as the result channel. You may explain briefly in chat, but the extension ignores that text.",
+    "For success, the file must be a JSON object with exactly: version, request_id, status, content_type, answer, completed_at, and optional metadata. Use version 1, the exact request_id, status complete, a useful MIME-like content_type (normally text/markdown), the full answer string, and a current ISO-8601 completed_at.",
+    "For human input, create the same file with status needs_user and reason instead of answer. For an unsafe/impossible execution state, use status blocked and reason.",
+    "For continuation before the 20-minute hard stop, create the same file with status continue, reason, and resume_state containing exact resumable state. The extension will persist the checkpoint and publish a higher ready revision for the same request.",
+    "Create and attach the file itself; do not merely paste the JSON into the chat message.",
+    formatHint,
+    `USER REQUEST:\n${request.prompt}${resume}`
+  ].join("\n\n");
 }
 
 export function streamKey(config) {
   return [config.owner, config.repo, config.branch || "main", config.path || ORACLE_RUNTIME_PATH]
-    .map((part) => String(part || "").trim())
-    .join("/");
+    .map((part) => String(part || "").trim()).join("/");
 }
 
 export function requestPath(requestId) {
-  const id = String(requestId || "").trim();
-  if (!id || id.includes("/") || id.includes("..")) throw new Error("invalid oracle request ID");
-  return `.patient-oracle/requests/${id}.json`;
+  return `.patient-oracle/requests/${normalizeRequestId(requestId)}.json`;
+}
+
+export function responsePath(requestId) {
+  return `.patient-oracle/responses/${normalizeRequestId(requestId)}.json`;
+}
+
+export function checkpointPath(requestId, revision) {
+  const id = normalizeRequestId(requestId);
+  const rev = Number(revision);
+  if (!Number.isSafeInteger(rev) || rev < 1) throw new Error("invalid checkpoint revision");
+  return `.patient-oracle/checkpoints/${id}/revision-${rev}.json`;
+}
+
+function rejectUnknown(value, allowed, label) {
+  const set = new Set(allowed);
+  const unknown = Object.keys(value).filter((key) => !set.has(key));
+  if (unknown.length) throw new Error(`${label} contains unsupported fields: ${unknown.join(", ")}`);
+}
+
+function normalizeRequestId(value) {
+  const id = String(value || "").trim();
+  if (!id || id.includes("/") || id.includes("..") || !/^[A-Za-z0-9._-]+$/.test(id)) throw new Error("invalid oracle request ID");
+  return id;
 }
 
 function normalizeTabId(tabId) {
