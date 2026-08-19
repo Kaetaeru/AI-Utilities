@@ -10,11 +10,11 @@
 </head>
 <body>
 <main>
-  <div><h1>Patient Oracle</h1><p>GitHub-backed request/response worker. The assistant DOM is never the answer channel.</p></div>
+  <div><h1>Patient Oracle</h1><p>GitHub-backed request/response worker. ChatGPT returns a generated response file; the extension makes the durable handoff.</p></div>
   <label>Owner<input id="owner" autocomplete="off" /></label>
   <label>Repository<input id="repo" autocomplete="off" /></label>
   <label>Branch<input id="branch" value="main" autocomplete="off" /></label>
-  <label>GitHub token <span class="hint">optional for public repos; recommended for polling/private repos</span><input id="token" type="password" autocomplete="off" /></label>
+  <label>GitHub token <span class="hint">required for Patient Oracle 0.2</span><input id="token" type="password" autocomplete="off" /></label>
   <label>Runtime path<input id="path" value=".patient-oracle/runtime.json" autocomplete="off" /></label>
   <div class="grid">
     <label>Poll seconds<input id="poll" type="number" min="5" value="90" /></label>
@@ -30,8 +30,8 @@
   </div>
   <p id="error" class="error" hidden></p>
   <div class="row"><button id="save">Save</button><button id="toggle">Start Oracle</button></div>
-  <p class="hint">This Side Panel stays open while you work in the browser. A non-empty ChatGPT draft is never overwritten; Patient Oracle now waits and retries instead of stopping.</p>
-  <p class="hint">GitHub approvals are never auto-clicked. To reduce repeated approval prompts, use ChatGPT Settings → Apps → GitHub → Ask permission → Never ask, or choose Always allow on an approval card, when your account/workspace exposes that option.</p>
+  <p class="hint">This Side Panel stays open while you work. A non-empty ChatGPT draft is never overwritten; Patient Oracle waits and retries.</p>
+  <p class="hint">Normal Patient Oracle work does not use the ChatGPT GitHub plugin. GitHub reads and writes are performed by the extension.</p>
 </main>
 <script type="module" src="popup.js"></script>
 </body>
