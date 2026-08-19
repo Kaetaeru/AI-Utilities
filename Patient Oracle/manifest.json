@@ -4,19 +4,21 @@
   "version": "0.1.0",
   "minimum_chrome_version": "116",
   "description": "A GitHub-backed ChatGPT request/response worker with durable identity and a 20-minute execution law.",
-  "permissions": ["storage", "activeTab", "scripting", "tabs"],
+  "permissions": ["storage", "activeTab", "sidePanel", "scripting", "tabs"],
   "host_permissions": [
     "https://api.github.com/*",
     "https://chatgpt.com/*",
     "https://chat.openai.com/*"
   ],
   "background": {
-    "service_worker": "background.js",
+    "service_worker": "sidepanel-background.js",
     "type": "module"
   },
   "action": {
-    "default_title": "Patient Oracle",
-    "default_popup": "popup.html"
+    "default_title": "Patient Oracle"
+  },
+  "side_panel": {
+    "default_path": "popup.html"
   },
   "content_scripts": [
     {
