@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Patient Oracle</title>
+  <style>
+    body{font:13px system-ui,sans-serif;margin:0;width:360px;background:#111;color:#eee}main{padding:14px;display:grid;gap:12px}h1{font-size:17px;margin:0}p{margin:0;color:#aaa;line-height:1.4}label{display:grid;gap:5px;color:#bbb}input{box-sizing:border-box;width:100%;padding:8px;border:1px solid #444;border-radius:6px;background:#191919;color:#fff}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.status{display:grid;grid-template-columns:1fr 1fr;gap:8px}.status div{background:#181818;padding:8px;border-radius:6px}.status span{display:block;color:#888;font-size:11px}.status strong{display:block;margin-top:3px;overflow-wrap:anywhere}button{padding:9px;border:0;border-radius:7px;font-weight:700;cursor:pointer}#save{background:#333;color:#fff}#toggle{background:#eee;color:#111}.error{color:#ff9b9b}.hint{font-size:11px}.row{display:flex;gap:8px}.row button{flex:1}
+  </style>
+</head>
+<body>
+<main>
+  <div><h1>Patient Oracle</h1><p>GitHub-backed request/response worker. The assistant DOM is never the answer channel.</p></div>
+  <label>Owner<input id="owner" autocomplete="off" /></label>
+  <label>Repository<input id="repo" autocomplete="off" /></label>
+  <label>Branch<input id="branch" value="main" autocomplete="off" /></label>
+  <label>GitHub token <span class="hint">optional for public repos; recommended for polling/private repos</span><input id="token" type="password" autocomplete="off" /></label>
+  <label>Runtime path<input id="path" value=".patient-oracle/runtime.json" autocomplete="off" /></label>
+  <div class="grid">
+    <label>Poll seconds<input id="poll" type="number" min="5" value="90" /></label>
+    <label>Max dispatches<input id="max" type="number" min="1" max="20" value="6" /></label>
+  </div>
+  <div class="status">
+    <div><span>Status</span><strong id="status">-</strong></div>
+    <div><span>Request</span><strong id="request">-</strong></div>
+    <div><span>Revision</span><strong id="revision">-</strong></div>
+    <div><span>Dispatches</span><strong id="dispatches">0</strong></div>
+    <div><span>18m checkpoint</span><strong id="checkpoint">-</strong></div>
+    <div><span>20m hard stop</span><strong id="hardstop">-</strong></div>
+  </div>
+  <p id="error" class="error" hidden></p>
+  <div class="row"><button id="save">Save</button><button id="toggle">Start Oracle</button></div>
+  <p class="hint">Open this popup from a ChatGPT tab. GitHub approvals remain manual. Stop Oracle before changing target settings.</p>
+</main>
+<script type="module" src="popup.js"></script>
+</body>
+</html>
