@@ -23,7 +23,11 @@
     if (message?.type === "PATIENT_ORACLE_PROMPT") {
       dispatchPrompt(message)
         .then(() => sendResponse({ sent: true }))
-        .catch((error) => sendResponse({ sent: false, error: error instanceof Error ? error.message : String(error) }));
+        .catch((error) => sendResponse({
+          sent: false,
+          code: String(error?.code || ""),
+          error: error instanceof Error ? error.message : String(error)
+        }));
       return true;
     }
   });
@@ -48,13 +52,13 @@
     const hardStopMs = Date.parse(String(message?.hardStopAt || ""));
     if (!prompt.trim()) throw new Error("Patient Oracle prompt is empty");
     if (!executionToken) throw new Error("Patient Oracle execution token is missing");
-    if (!isChatIdle()) throw new Error("ChatGPT is still generating");
-    if (findGitHubApprovalCard()) throw new Error("GitHub approval is pending; Patient Oracle will not dispatch");
+    if (!isChatIdle()) fail("chat_busy", "ChatGPT is still generating");
+    if (findGitHubApprovalCard()) fail("approval_pending", "GitHub approval is pending; Patient Oracle will not dispatch");
     if (!Number.isFinite(checkpointMs) || !Number.isFinite(hardStopMs) || checkpointMs >= hardStopMs || hardStopMs <= Date.now()) throw new Error("Patient Oracle execution budget is invalid");
 
     const composer = await waitForComposer(10000);
     if (!composer) throw new Error("ChatGPT composer was not found");
-    if (readComposer(composer).trim()) throw new Error("ChatGPT composer is not empty; user draft is protected");
+    if (readComposer(composer).trim()) fail("composer_not_empty", "ChatGPT composer is not empty; user draft is protected");
     writeComposer(composer, prompt);
     if (!await waitForComposerText(prompt, 1500)) throw new Error("Prompt text did not synchronize with the ChatGPT composer");
 
@@ -66,6 +70,12 @@
       disarm(executionToken);
       throw new Error("Patient Oracle could not confirm prompt submission");
     }
+  }
+
+  function fail(code, message) {
+    const error = new Error(message);
+    error.code = code;
+    throw error;
   }
 
   function arm(token, checkpointMs, hardStopMs) {
