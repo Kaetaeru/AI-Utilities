@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
+  <title>UI Blueprint</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <div class="brand" data-tooltip="UI Blueprint — sketch UI intent fast, then hand it to AI.">
+        <span class="brand-mark">UB</span>
+        <span class="brand-name">UI Blueprint</span>
+      </div>
+
+      <label class="document-title-wrap" data-tooltip="Blueprint name — used in exported file names.">
+        <input id="document-title" class="document-title" aria-label="Blueprint name" spellcheck="false" />
+      </label>
+
+      <div class="tool-strip" aria-label="Drawing tools">
+        <button class="tool-button" data-tool="select" data-tooltip="Select · V|Click, move, resize, or double-click text to edit.">
+          <span class="tool-glyph">↖</span><span>Select</span><kbd>V</kbd>
+        </button>
+        <button class="tool-button" data-tool="frame" data-tooltip="Frame · F|Draw a semantic container or region.">
+          <span class="tool-glyph">▣</span><span>Frame</span><kbd>F</kbd>
+        </button>
+        <button class="tool-button" data-tool="box" data-tooltip="Box · B|Drag a box, release, then type its label immediately.">
+          <span class="tool-glyph">▭</span><span>Box</span><kbd>B</kbd>
+        </button>
+        <button class="tool-button" data-tool="text" data-tooltip="Text · T|Click or drag to place plain text, then type.">
+          <span class="tool-glyph">T</span><span>Text</span><kbd>T</kbd>
+        </button>
+        <button class="tool-button" data-tool="image" data-tooltip="Image · I|Draw an image placeholder. The blueprint stores intent, not image bytes.">
+          <span class="tool-glyph">◇</span><span>Image</span><kbd>I</kbd>
+        </button>
+      </div>
+
+      <div class="topbar-spacer"></div>
+
+      <div class="output-strip" aria-label="Output actions">
+        <button id="copy-ai" class="primary-action" data-tooltip="Copy for AI|Copies a compact, authoritative handoff for the current screen. Paste it directly into an AI chat or coding agent.">
+          <span>Copy for AI</span><kbd>⌘⇧C</kbd>
+        </button>
+        <button id="copy-preview" class="icon-action" data-tooltip="Copy preview|Copies the current screen as PNG when your browser supports image clipboard.">PNG↗</button>
+        <button id="export-json" class="icon-action" data-tooltip="Export .uib.json|Saves the complete editable blueprint document.">JSON</button>
+        <button id="import-json" class="icon-action" data-tooltip="Import .uib.json|Loads a previously exported blueprint document.">Import</button>
+        <input id="file-input" type="file" accept="application/json,.json,.uib.json" hidden />
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="left-panel panel">
+        <section class="panel-section screens-section">
+          <div class="section-heading">
+            <span>Screens</span>
+            <button id="add-screen" class="mini-button" data-tooltip="New screen|Add another artboard to this blueprint.">+</button>
+          </div>
+          <div id="screen-list" class="screen-list"></div>
+        </section>
+
+        <section class="panel-section layers-section">
+          <div class="section-heading">
+            <span>Layers</span>
+            <span id="layer-count" class="section-meta">0</span>
+          </div>
+          <div id="layer-list" class="layer-list"></div>
+        </section>
+      </aside>
+
+      <section id="stage" class="stage" tabindex="0" aria-label="Blueprint canvas">
+        <div id="stage-empty" class="stage-empty" hidden>No screen selected.</div>
+        <div id="artboard-shell" class="artboard-shell">
+          <div id="artboard" class="artboard"></div>
+        </div>
+        <div id="draw-preview" class="draw-preview" hidden></div>
+      </section>
+
+      <aside class="right-panel panel">
+        <div id="inspector" class="inspector"></div>
+      </aside>
+    </main>
+
+    <footer class="statusbar">
+      <div id="status-hint" class="status-hint">V Select · B Box · T Text · F Frame · I Image</div>
+      <div class="status-actions">
+        <button id="toggle-grid" class="status-button" data-tooltip="Snap grid · G|Toggle 8px snapping while drawing and moving.">Grid 8</button>
+        <button id="zoom-out" class="status-button" data-tooltip="Zoom out · -|Decrease canvas zoom.">−</button>
+        <button id="zoom-label" class="status-button wide" data-tooltip="Fit screen · 0|Click to fit the active artboard in the canvas.">100%</button>
+        <button id="zoom-in" class="status-button" data-tooltip="Zoom in · +|Increase canvas zoom.">+</button>
+      </div>
+    </footer>
+  </div>
+
+  <div id="tooltip" class="tooltip" role="tooltip" hidden>
+    <div id="tooltip-title" class="tooltip-title"></div>
+    <div id="tooltip-body" class="tooltip-body"></div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>
