@@ -5,15 +5,22 @@
   const PORT = "patient-oracle-content";
   const TICK_MS = 2000;
   const STABLE_IDLE_MS = 700;
+  const ARTIFACT_RETRY_MS = 5000;
   let port = null;
   let reconnectTimer = null;
   let armedToken = null;
+  let expectedFilename = null;
   let sawGenerating = false;
   let idleSince = null;
-  let completionTimer = null;
+  let idleNotified = false;
   let checkpointTimer = null;
   let hardStopTimer = null;
   let hardStopAtMs = null;
+  let artifactInFlight = false;
+  let artifactSent = false;
+  let artifactMessageId = null;
+  let artifactRetryAt = 0;
+  let artifactErrorKey = null;
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "PATIENT_ORACLE_PING") {
@@ -33,10 +40,10 @@
   });
 
   connect();
-  const observer = new MutationObserver(observeLifecycle);
+  const observer = new MutationObserver(() => { void observeLifecycle(); });
   observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
   setInterval(() => {
-    observeLifecycle();
+    void observeLifecycle();
     post({
       type: "PATIENT_ORACLE_POLL",
       idleStableForMs: idleSince === null ? 0 : Math.max(0, Date.now() - idleSince),
@@ -48,12 +55,14 @@
   async function dispatchPrompt(message) {
     const prompt = String(message?.prompt || "");
     const executionToken = String(message?.executionToken || "");
+    const responseName = String(message?.responseFilename || "");
     const checkpointMs = Date.parse(String(message?.checkpointAt || ""));
     const hardStopMs = Date.parse(String(message?.hardStopAt || ""));
     if (!prompt.trim()) throw new Error("Patient Oracle prompt is empty");
     if (!executionToken) throw new Error("Patient Oracle execution token is missing");
+    if (!/^patient-oracle-response-[A-Za-z0-9._-]+\.json$/.test(responseName)) throw new Error("Patient Oracle response filename is invalid");
     if (!isChatIdle()) fail("chat_busy", "ChatGPT is still generating");
-    if (findGitHubApprovalCard()) fail("approval_pending", "GitHub approval is pending; Patient Oracle will not dispatch");
+    if (findGitHubApprovalCard()) fail("approval_pending", "A ChatGPT GitHub approval is pending; Patient Oracle will not dispatch");
     if (!Number.isFinite(checkpointMs) || !Number.isFinite(hardStopMs) || checkpointMs >= hardStopMs || hardStopMs <= Date.now()) throw new Error("Patient Oracle execution budget is invalid");
 
     const composer = await waitForComposer(10000);
@@ -62,7 +71,7 @@
     writeComposer(composer, prompt);
     if (!await waitForComposerText(prompt, 1500)) throw new Error("Prompt text did not synchronize with the ChatGPT composer");
 
-    arm(executionToken, checkpointMs, hardStopMs);
+    arm(executionToken, responseName, checkpointMs, hardStopMs);
     const sendButton = await waitForSendButton(4000);
     if (sendButton) sendButton.click();
     else dispatchEnter(composer);
@@ -78,12 +87,19 @@
     throw error;
   }
 
-  function arm(token, checkpointMs, hardStopMs) {
+  function arm(token, responseName, checkpointMs, hardStopMs) {
     clearTimers();
     armedToken = token;
+    expectedFilename = responseName;
     sawGenerating = false;
     idleSince = null;
+    idleNotified = false;
     hardStopAtMs = hardStopMs;
+    artifactInFlight = false;
+    artifactSent = false;
+    artifactMessageId = null;
+    artifactRetryAt = 0;
+    artifactErrorKey = null;
     checkpointTimer = setTimeout(() => {
       if (armedToken === token) post({ type: "PATIENT_ORACLE_CHECKPOINT_DUE", executionToken: token });
     }, Math.max(0, checkpointMs - Date.now()));
@@ -103,37 +119,81 @@
     disarm(token);
   }
 
-  function observeLifecycle() {
+  async function observeLifecycle() {
     const approvalVisible = Boolean(findGitHubApprovalCard());
     const idle = isChatIdle();
     if (approvalVisible || !idle) {
       idleSince = null;
       if (!idle && armedToken) sawGenerating = true;
-      if (completionTimer) clearTimeout(completionTimer);
-      completionTimer = null;
-      return;
+    } else if (idleSince === null) {
+      idleSince = Date.now();
     }
-    if (idleSince === null) idleSince = Date.now();
-    if (!armedToken || !sawGenerating || completionTimer) return;
-    completionTimer = setTimeout(() => {
-      completionTimer = null;
-      if (!armedToken || !sawGenerating || !isChatIdle() || findGitHubApprovalCard()) return;
-      if (idleSince === null || Date.now() - idleSince < STABLE_IDLE_MS) return;
+
+    if (!armedToken) return;
+    await tryCaptureResponseArtifact();
+    if (!sawGenerating || approvalVisible || !idle || idleNotified || idleSince === null) return;
+    if (Date.now() - idleSince < STABLE_IDLE_MS) return;
+    idleNotified = true;
+    post({ type: "PATIENT_ORACLE_TURN_IDLE", executionToken: armedToken });
+  }
+
+  async function tryCaptureResponseArtifact() {
+    if (!armedToken || !expectedFilename || artifactInFlight || artifactSent || Date.now() < artifactRetryAt) return;
+    const candidate = findResponseFileCandidate(expectedFilename);
+    if (!candidate) return;
+    artifactInFlight = true;
+    const token = armedToken;
+    try {
+      const artifact = await readFileCandidate(candidate);
+      if (armedToken !== token) return;
+      const messageId = `artifact-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      artifactMessageId = messageId;
+      post({
+        type: artifact.text !== null ? "PATIENT_ORACLE_RESPONSE_ARTIFACT" : "PATIENT_ORACLE_RESPONSE_ARTIFACT_URL",
+        messageId,
+        executionToken: token,
+        filename: expectedFilename,
+        ...(artifact.text !== null ? { text: artifact.text } : { url: artifact.url })
+      });
+    } catch (error) {
+      artifactInFlight = false;
+      artifactRetryAt = Date.now() + ARTIFACT_RETRY_MS;
+      const key = String(error?.message || error || "artifact read failed");
+      if (artifactErrorKey !== key) {
+        artifactErrorKey = key;
+        post({ type: "PATIENT_ORACLE_ARTIFACT_ERROR", executionToken: token, error: key });
+      }
+    }
+  }
+
+  function handleAck(message) {
+    if (message?.type !== "PATIENT_ORACLE_ACK" || !artifactMessageId || message.messageId !== artifactMessageId) return;
+    artifactInFlight = false;
+    artifactMessageId = null;
+    if (message.ok) {
+      artifactSent = true;
       const token = armedToken;
       disarm(token);
-      post({ type: "PATIENT_ORACLE_TURN_FINISHED", executionToken: token });
-    }, STABLE_IDLE_MS);
+      return;
+    }
+    artifactRetryAt = Date.now() + ARTIFACT_RETRY_MS;
+    if (!message.retryable) artifactErrorKey = String(message.error || "response handoff failed");
   }
 
   function disarm(token) {
     if (token && armedToken !== token) return;
     armedToken = null;
+    expectedFilename = null;
     sawGenerating = false;
     idleSince = null;
+    idleNotified = false;
     hardStopAtMs = null;
+    artifactInFlight = false;
+    artifactSent = false;
+    artifactMessageId = null;
+    artifactRetryAt = 0;
+    artifactErrorKey = null;
     clearTimers();
-    if (completionTimer) clearTimeout(completionTimer);
-    completionTimer = null;
   }
 
   function clearTimers() {
@@ -147,6 +207,7 @@
     if (port) return;
     try {
       port = chrome.runtime.connect({ name: PORT });
+      port.onMessage.addListener(handleAck);
       port.onDisconnect.addListener(() => {
         port = null;
         if (reconnectTimer) clearTimeout(reconnectTimer);
@@ -160,6 +221,73 @@
   function post(message) {
     if (!port) connect();
     try { port?.postMessage(message); } catch { port = null; connect(); }
+  }
+
+  function findResponseFileCandidate(filename) {
+    const wanted = normalizeText(filename).toLowerCase();
+    const nodes = document.querySelectorAll('a[href], a[download], [role="link"][href]');
+    for (const node of nodes) {
+      const labels = [
+        node.getAttribute("download"),
+        node.getAttribute("title"),
+        node.getAttribute("aria-label"),
+        node.textContent,
+        filenameFromUrl(node.getAttribute("href"))
+      ].map((value) => normalizeText(value).toLowerCase()).filter(Boolean);
+      if (labels.some((label) => label === wanted || label.endsWith(`/${wanted}`) || label.includes(wanted))) return node;
+    }
+    return null;
+  }
+
+  async function readFileCandidate(node) {
+    const urls = candidateUrls(node);
+    if (!urls.length) throw new Error(`Found ${expectedFilename} but no readable file URL was exposed`);
+    let lastError = null;
+    for (const url of urls) {
+      try {
+        if (url.startsWith("sandbox:")) throw new Error("ChatGPT exposed only a sandbox URL; no fetchable download URL was available");
+        const response = await fetch(url, { method: "GET", credentials: "include", cache: "no-store" });
+        if (!response.ok) throw new Error(`response file fetch failed with HTTP ${response.status}`);
+        const text = await response.text();
+        if (!text.trim()) throw new Error("response file was empty");
+        return { text, url: null };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    const httpFallback = urls.find((url) => /^https?:/i.test(url));
+    if (httpFallback) return { text: null, url: httpFallback };
+    throw lastError || new Error("Could not read generated Patient Oracle response file");
+  }
+
+  function candidateUrls(node) {
+    const values = [];
+    const add = (value) => {
+      const raw = String(value || "").trim();
+      if (!raw || raw.startsWith("javascript:")) return;
+      try {
+        const resolved = raw.startsWith("blob:") || raw.startsWith("sandbox:") ? raw : new URL(raw, location.href).href;
+        if (!values.includes(resolved)) values.push(resolved);
+      } catch {}
+    };
+    add(node.getAttribute("href"));
+    for (const attr of ["data-download-url", "data-file-url", "data-url", "data-href"]) add(node.getAttribute(attr));
+    let parent = node.parentElement;
+    for (let depth = 0; parent && depth < 4; depth += 1, parent = parent.parentElement) {
+      for (const attr of ["data-download-url", "data-file-url", "data-url", "data-href"]) add(parent.getAttribute(attr));
+      const anchor = parent.querySelector?.("a[href]");
+      if (anchor) add(anchor.getAttribute("href"));
+    }
+    return values;
+  }
+
+  function filenameFromUrl(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    try {
+      const url = raw.startsWith("sandbox:") ? raw.replace(/^sandbox:/, "https://sandbox.invalid") : new URL(raw, location.href).href;
+      return decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
+    } catch { return ""; }
   }
 
   function findComposer() {
@@ -220,7 +348,7 @@
   function findSendButton() {
     const composer = findComposer();
     const form = composer?.closest("form");
-    for (const selector of ['button[data-testid="send-button"]','button[aria-label*="Send"]','button[aria-label*="send"]','button[aria-label*="전송"]','button[type="submit"]']) {
+    for (const selector of ['button[data-testid="send-button"]', 'button[aria-label*="Send"]', 'button[aria-label*="send"]', 'button[aria-label*="전송"]', 'button[type="submit"]']) {
       const button = form?.querySelector(selector) || document.querySelector(selector);
       if (button && !button.disabled && button.getAttribute("aria-disabled") !== "true") return button;
     }
@@ -255,7 +383,7 @@
   }
 
   function findStopButton() {
-    for (const selector of ['button[data-testid="stop-button"]','button[aria-label*="Stop"]','button[aria-label*="stop"]','button[aria-label*="중지"]']) {
+    for (const selector of ['button[data-testid="stop-button"]', 'button[aria-label*="Stop"]', 'button[aria-label*="stop"]', 'button[aria-label*="중지"]']) {
       const button = document.querySelector(selector);
       if (button) return button;
     }
@@ -271,7 +399,7 @@
       let node = button;
       for (let depth = 0; node && depth < 10; depth += 1, node = node.parentElement) {
         const text = normalizeText(node.textContent);
-        if (text.length > 1600 || !text.includes("GitHub")) continue;
+        if (text.length > 1800 || !/GitHub/i.test(text)) continue;
         if (/ChatGPT가\s*GitHub.*사용하도록\s*허용할까요/i.test(text) || /allow\s+ChatGPT\s+to\s+use\s+GitHub/i.test(text)) return node;
       }
     }
