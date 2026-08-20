@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "request_id": "REQ-E2E-0002",
+  "status": "complete",
+  "content_type": "text/markdown",
+  "answer": "PATIENT_ORACLE_FILE_HANDOFF_OK\n\nThis result was transported through a generated response file. The downloadable UTF-8 JSON file is the machine-readable handoff for this request.",
+  "completed_at": "2026-08-20T05:53:48.194685Z"
+}
