@@ -30,10 +30,12 @@ test("interrupted ready revision is recovered with a higher SHA-protected revisi
   assert.match(server, /could not verify the server recovery revision/);
 });
 
-test("Side Panel can opt into persistent Server Mode", () => {
+test("Side Panel can opt into persistent Server Mode independently of Start Stop", () => {
   assert.match(popup, /SERVER_CONFIG_KEY/);
   assert.match(popup, /enableServerMode/);
-  assert.match(popup, /disableServerModeForThisTab/);
+  assert.match(popup, /applyServerModePreference/);
+  assert.match(popup, /USER_INTENT_KEY/);
+  assert.doesNotMatch(popup, /disableServerModeForThisTab/);
   assert.match(popup, /pinned: true, autoDiscardable: false/);
 });
 
