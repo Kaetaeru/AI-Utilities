@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UI Converger</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div><p class="eyebrow">AI Utilities</p><h1>UI Converger</h1><p class="lede">Turn an exact UI Blueprint into controlled, reversible code iterations through Patient Oracle.</p></div>
+      <div class="pill">Patient Oracle RPC</div>
+    </header>
+    <section class="panel">
+      <div class="section-title"><span>1</span><div><h2>Connect the target</h2><p>The target app stays local. Patient Oracle uses its deployed GitHub mailbox as the durable API channel.</p></div></div>
+      <div class="grid two">
+        <label>Local repository path<input id="repoPath" placeholder="/Users/me/project"></label>
+        <label>Preview URL<input id="previewUrl" value="http://127.0.0.1:3000/"></label>
+        <label>Oracle GitHub owner<input id="oracleOwner" value="Kaetaeru"></label>
+        <label>Oracle GitHub repository<input id="oracleRepo" value="AI-Utilities"></label>
+        <label>Oracle runtime/mailbox branch<input id="oracleBranch" value="agent/patient-oracle-e2e"></label>
+        <div class="grid two compact"><label>Viewport width<input id="viewportWidth" type="number" value="1440"></label><label>Viewport height<input id="viewportHeight" type="number" value="1000"></label></div>
+      </div>
+      <p class="hint">Deployed Patient Oracle mailbox: <code>Kaetaeru/AI-Utilities@agent/patient-oracle-e2e</code>. Change it only when the operator intentionally moves the mailbox.</p>
+      <label>User intent<textarea id="intent" rows="3" placeholder="Match this dashboard. Keep navigation behavior and brand colors unchanged."></textarea></label>
+      <label>Protected paths<textarea id="protectedPaths" rows="2" placeholder="src/navigation, src/auth"></textarea></label>
+    </section>
+    <section class="panel">
+      <div class="section-title"><span>2</span><div><h2>Define the target</h2><p>Paste or import a UI Blueprint <code>.uib.json</code> document.</p></div></div>
+      <div class="file-row"><input id="blueprintFile" type="file" accept=".json,.uib.json,application/json"></div>
+      <textarea id="blueprint" class="code" rows="16" spellcheck="false" placeholder='{"schema":"uib/0.2","screens":[...]}'></textarea>
+      <button id="start" class="primary">Start controlled session</button>
+    </section>
+    <section id="session" class="panel" hidden>
+      <div class="section-title"><span>3</span><div><h2>Converge</h2><p>Plan first, then run one reversible iteration at a time. A local timeout keeps the same durable Patient Oracle request ID; press the same action again to continue waiting.</p></div></div>
+      <div class="actions"><button id="plan">Create implementation plan</button><button id="iterate" class="primary" disabled>Run next iteration</button></div>
+      <div class="result-grid"><article><h3>Session</h3><pre id="sessionMeta"></pre></article><article><h3>Approved plan</h3><pre id="planOutput">No plan yet.</pre></article></div>
+      <article class="wide"><h3>Last iteration</h3><pre id="iterationOutput">No iteration yet.</pre></article>
+    </section>
+    <section class="panel log-panel"><h2>Activity</h2><div id="log" class="log"></div></section>
+  </main>
+  <script type="module" src="/src/app.js"></script>
+</body>
+</html>
