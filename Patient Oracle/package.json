@@ -1,10 +1,10 @@
 {
   "name": "patient-oracle",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check sidepanel-background.js && node --check background.js && node --check content.js && node --check artifact-preview-v2.js && node --check control.js && node --check popup.js && node --check caller.mjs",
+    "check": "node --check sidepanel-background.js && node --check background.js && node --check server-mode.js && node --check content.js && node --check artifact-preview-v2.js && node --check control.js && node --check popup.js && node --check caller.mjs",
     "test": "node --test",
     "oracle:ask": "node caller.mjs ask"
   }
