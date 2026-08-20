@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "request_id": "REQ-SERVER-0002",
+  "prompt": "Return exactly PATIENT_ORACLE_SERVER_OK.",
+  "created_at": "2026-08-20T07:20:46.781Z",
+  "response_format": "text/markdown"
+}
