@@ -2,11 +2,13 @@ import { DEFAULT_CONFIG, DEFAULT_STATE } from "./control.js";
 
 const SERVER_CONFIG_KEY = "patientOracleServerConfig";
 const SERVER_STATE_KEY = "patientOracleServerState";
+const USER_INTENT_KEY = "patientOracleUserIntent";
 const port = chrome.runtime.connect({ name: "patient-oracle-panel" });
 let counter = 0;
 const pending = new Map();
 const tab = await getActiveChatGptTab();
 const ui = Object.fromEntries(["owner","repo","branch","token","path","poll","max","server","serverStatus","status","request","revision","dispatches","checkpoint","hardstop","error","save","toggle"].map((id) => [id, document.getElementById(id)]));
+const configControls = [ui.owner, ui.repo, ui.branch, ui.token, ui.path, ui.poll, ui.max, ui.server];
 
 port.onMessage.addListener((message) => {
   const entry = pending.get(String(message?.requestId || ""));
@@ -32,9 +34,9 @@ async function load() {
   ui.path.value = config.path;
   ui.poll.value = String(config.pollIntervalSeconds);
   ui.max.value = String(config.maxRedispatchesPerRequest);
-  const server = await getServerConfig();
-  ui.server.checked = Boolean(server.enabled && Number(server.workerTabId) === tab.id);
-  render(snapshot.state || DEFAULT_STATE, server);
+  const [server, intent] = await Promise.all([getServerConfig(), getUserIntent()]);
+  ui.server.checked = Boolean(server.enabled);
+  render(snapshot.state || DEFAULT_STATE, server, intent);
 }
 
 function formConfig() {
@@ -50,30 +52,64 @@ function formConfig() {
 }
 
 async function save() {
+  const intent = await getUserIntent();
+  if (intent.started) throw new Error("Stop Patient Oracle before changing settings");
   const state = (await request("PATIENT_ORACLE_STATUS")).state || DEFAULT_STATE;
-  if (state.enabled) throw new Error("Stop Patient Oracle before changing settings");
+  if (state.enabled) throw new Error("The worker is still operationally active. Stop it before changing settings.");
   await request("PATIENT_ORACLE_SAVE", { config: formConfig() });
+  await applyServerModePreference(formConfig());
   await refresh();
 }
 
 async function toggle() {
-  const snapshot = await request("PATIENT_ORACLE_STATUS");
-  if (snapshot.state?.enabled) {
-    await disableServerModeForThisTab();
+  const intent = await getUserIntent();
+  if (intent.started) {
+    await setUserIntent(false);
     await request("PATIENT_ORACLE_STOP");
-  } else {
-    await save();
+    await refresh();
+    return;
+  }
+
+  // User intent is authoritative. Record Start before any operational work.
+  await setUserIntent(true);
+  const desiredConfig = formConfig();
+  const snapshot = await request("PATIENT_ORACLE_STATUS");
+
+  try {
+    if (!snapshot.state?.enabled) {
+      await request("PATIENT_ORACLE_SAVE", { config: desiredConfig });
+    } else if (!sameConfig(snapshot.config || DEFAULT_CONFIG, desiredConfig)) {
+      throw new Error("Start is latched ON, but the existing worker still has different settings. Press Stop, save the settings, then press Start again.");
+    }
+
+    await applyServerModePreference(desiredConfig);
     await recoverAlreadyDispatchedReadyRevision();
     const started = await request("PATIENT_ORACLE_START");
     if (started?.reason === "already_dispatched") {
-      throw new Error("This ready revision was already dispatched locally. Stop and Start Oracle again to publish a safe higher retry revision.");
+      throw new Error("Start is latched ON, but this ready revision was already dispatched locally. The worker recovery path must publish a safe retry revision.");
     }
+
     if (ui.server.checked) {
       const after = await request("PATIENT_ORACLE_STATUS");
-      await enableServerMode(after.config || formConfig(), after.state || DEFAULT_STATE);
+      await enableServerMode(after.config || desiredConfig, after.state || DEFAULT_STATE);
     }
+  } finally {
+    // Never change user intent here. Operational success/failure is separate from Start/Stop.
   }
   await refresh();
+}
+
+async function applyServerModePreference(config) {
+  if (ui.server.checked) {
+    const snapshot = await request("PATIENT_ORACLE_STATUS");
+    await enableServerMode(config, snapshot.state || DEFAULT_STATE);
+    return;
+  }
+  const server = await getServerConfig();
+  if (!server.enabled) return;
+  await chrome.storage.local.set({
+    [SERVER_CONFIG_KEY]: { ...server, enabled: false, updatedAt: new Date().toISOString() }
+  });
 }
 
 async function enableServerMode(config, state) {
@@ -97,14 +133,6 @@ async function enableServerMode(config, state) {
   await chrome.tabs.update(tab.id, { pinned: true, autoDiscardable: false });
 }
 
-async function disableServerModeForThisTab() {
-  const server = await getServerConfig();
-  if (!server.enabled || Number(server.workerTabId) !== tab.id) return;
-  await chrome.storage.local.set({
-    [SERVER_CONFIG_KEY]: { ...server, enabled: false, updatedAt: new Date().toISOString() }
-  });
-}
-
 async function getServerConfig() {
   const stored = await chrome.storage.local.get(SERVER_CONFIG_KEY);
   const value = stored[SERVER_CONFIG_KEY] || {};
@@ -114,6 +142,46 @@ async function getServerConfig() {
     workerTabId: value.workerTabId ?? null,
     config: { ...DEFAULT_CONFIG, ...(value.config || {}) },
     updatedAt: value.updatedAt || null
+  };
+}
+
+async function getUserIntent() {
+  const stored = await chrome.storage.local.get(USER_INTENT_KEY);
+  const value = stored[USER_INTENT_KEY] || {};
+  return {
+    version: 1,
+    started: Boolean(value.started),
+    changedAt: value.changedAt || null,
+    changedFromTabId: Number.isSafeInteger(Number(value.changedFromTabId)) ? Number(value.changedFromTabId) : null
+  };
+}
+
+async function setUserIntent(started) {
+  await chrome.storage.local.set({
+    [USER_INTENT_KEY]: {
+      version: 1,
+      started: Boolean(started),
+      changedAt: new Date().toISOString(),
+      changedFromTabId: tab.id
+    }
+  });
+}
+
+function sameConfig(a, b) {
+  const left = normalizedConfig(a);
+  const right = normalizedConfig(b);
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function normalizedConfig(value) {
+  return {
+    owner: String(value?.owner || "").trim(),
+    repo: String(value?.repo || "").trim(),
+    branch: String(value?.branch || "main").trim() || "main",
+    githubToken: String(value?.githubToken || "").trim(),
+    path: String(value?.path || DEFAULT_CONFIG.path).replace(/^\/+/, "").trim() || DEFAULT_CONFIG.path,
+    pollIntervalSeconds: Math.max(5, Math.floor(Number(value?.pollIntervalSeconds) || DEFAULT_CONFIG.pollIntervalSeconds)),
+    maxRedispatchesPerRequest: Math.min(20, Math.max(1, Math.floor(Number(value?.maxRedispatchesPerRequest) || DEFAULT_CONFIG.maxRedispatchesPerRequest)))
   };
 }
 
@@ -222,14 +290,14 @@ async function githubError(response, action) {
 
 async function refresh() {
   try {
-    const [snapshot, server] = await Promise.all([request("PATIENT_ORACLE_STATUS"), getServerConfig()]);
-    render(snapshot.state || DEFAULT_STATE, server);
+    const [snapshot, server, intent] = await Promise.all([request("PATIENT_ORACLE_STATUS"), getServerConfig(), getUserIntent()]);
+    render(snapshot.state || DEFAULT_STATE, server, intent);
   } catch (error) {
     showError(error);
   }
 }
 
-function render(state, server = { enabled: false, workerTabId: null }) {
+function render(state, server = { enabled: false, workerTabId: null }, intent = { started: false }) {
   ui.status.textContent = displayStatus(state);
   ui.serverStatus.textContent = server.enabled ? (Number(server.workerTabId) === tab.id ? "On · this tab" : `On · tab ${server.workerTabId}`) : "Off";
   ui.request.textContent = state.currentRequestId || "-";
@@ -237,8 +305,9 @@ function render(state, server = { enabled: false, workerTabId: null }) {
   ui.dispatches.textContent = String(state.requestDispatchCount || 0);
   ui.checkpoint.textContent = formatTime(state.checkpointAt);
   ui.hardstop.textContent = formatTime(state.executionHardStopAt);
-  ui.toggle.textContent = state.enabled ? "Stop Oracle" : "Start Oracle";
-  ui.save.disabled = Boolean(state.enabled);
+  ui.toggle.textContent = intent.started ? "Stop Oracle" : "Start Oracle";
+  ui.save.disabled = Boolean(intent.started);
+  for (const control of configControls) control.disabled = Boolean(intent.started);
   if (state.lastError) showError(new Error(state.lastError)); else hideError();
 }
 
@@ -255,6 +324,7 @@ function displayStatus(state) {
     waiting_for_empty_composer: "Waiting for empty composer",
     waiting_for_manual_approval: "Waiting for manual approval",
     waiting_for_chat_idle: "Waiting for ChatGPT",
+    waiting_for_dispatch_retry: "Waiting for dispatch retry",
     ready: "Ready",
     complete: "Complete",
     needs_user: "Needs user",
