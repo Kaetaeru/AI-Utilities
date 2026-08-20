@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "request_id": "REQ-QUEUE-0002",
+  "status": "complete",
+  "content_type": "text/markdown",
+  "answer": "QUEUE_TWO_OK",
+  "completed_at": "2026-08-20T07:36:33.703998Z"
+}
