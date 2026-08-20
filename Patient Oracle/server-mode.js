@@ -1,4 +1,4 @@
-import { DEFAULT_CONFIG, DEFAULT_STATE, configKey, stateKey, streamKey } from "./control.js";
+import { DEFAULT_CONFIG, DEFAULT_STATE, configKey, responsePath, stateKey, streamKey } from "./control.js";
 
 export const SERVER_CONFIG_KEY = "patientOracleServerConfig";
 export const SERVER_STATE_KEY = "patientOracleServerState";
@@ -162,6 +162,26 @@ async function recoverInterruptedReadyRevision(config, previous) {
   if (runtime.revision > dispatched) return { ...previous, lastRevision: runtime.revision, lastStatus: runtime.status, lastReason: runtime.reason || null };
   if (String(runtime.request_id || "") !== String(previous.currentRequestId || "")) return previous;
 
+  const durableResponseFile = await getGitHubFile(config, responsePath(runtime.request_id), true);
+  if (durableResponseFile) {
+    const response = parseDurableResponse(durableResponseFile.text, runtime.request_id);
+    const terminal = {
+      version: 1,
+      run_id: runtime.run_id,
+      revision: runtime.revision + 1,
+      status: response.status,
+      request_id: runtime.request_id,
+      reason: response.status === "complete" ? "server recovery found durable response artifact" : response.reason,
+      updated_at: new Date().toISOString()
+    };
+    await putGitHubRuntimeFile(config, runtimeFile.sha, terminal);
+    const verifiedTerminal = parseRuntime((await getGitHubRuntimeFile(config)).text);
+    if (verifiedTerminal.revision !== terminal.revision || verifiedTerminal.status !== terminal.status || verifiedTerminal.request_id !== terminal.request_id) {
+      throw new Error("Patient Oracle could not verify terminal recovery from durable response");
+    }
+    return { ...previous, lastRevision: terminal.revision, lastStatus: terminal.status, lastReason: terminal.reason, lastError: null };
+  }
+
   const next = {
     version: 1,
     run_id: runtime.run_id,
@@ -236,6 +256,31 @@ function validateConfig(config) {
   if (!config.owner || !config.repo) throw new Error("Patient Oracle Server Mode requires GitHub owner and repository");
   if (!config.githubToken) throw new Error("Patient Oracle Server Mode requires a GitHub token");
   if (/[^\x21-\x7E]/.test(config.githubToken)) throw new Error("Patient Oracle Server Mode GitHub token must be the actual ASCII token value");
+}
+
+async function getGitHubFile(config, path, allow404 = false) {
+  const response = await fetch(contentsUrl(config, path, true), { method: "GET", headers: githubHeaders(config.githubToken), cache: "no-store" });
+  if (response.status === 404 && allow404) return null;
+  if (!response.ok) throw new Error(`Patient Oracle server recovery could not read ${path}: HTTP ${response.status}`);
+  const body = await response.json();
+  if (body?.type !== "file" || typeof body.content !== "string") throw new Error(`Patient Oracle server recovery ${path} did not resolve to a file`);
+  return { sha: body.sha || null, text: base64ToUtf8(body.content.replace(/\n/g, "")) };
+}
+
+function parseDurableResponse(text, requestId) {
+  let value;
+  try { value = JSON.parse(text); } catch { throw new Error("Patient Oracle durable response is not valid JSON"); }
+  if (!value || value.version !== 1 || value.request_id !== requestId || !["complete", "needs_user", "blocked"].includes(value.status)) throw new Error("Patient Oracle durable response identity or status is invalid");
+  if (value.status === "complete" && !String(value.answer || "").trim()) throw new Error("Patient Oracle durable complete response requires answer");
+  if (value.status !== "complete" && !String(value.reason || "").trim()) throw new Error(`Patient Oracle durable ${value.status} response requires reason`);
+  return value;
+}
+
+function contentsUrl(config, path, includeRef) {
+  const encoded = String(path).split("/").map(encodeURIComponent).join("/");
+  const url = new URL(`https://api.github.com/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/${encoded}`);
+  if (includeRef) url.searchParams.set("ref", config.branch);
+  return url.toString();
 }
 
 async function getGitHubRuntimeFile(config) {
