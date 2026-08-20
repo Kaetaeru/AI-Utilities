@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "request_id": "REQ-SERVER-0001",
+  "status": "complete",
+  "content_type": "text/markdown",
+  "answer": "SERVER_MODE_OK\n\nThis request was processed by the remote Patient Oracle worker.",
+  "completed_at": "2026-08-20T07:07:04.094716Z"
+}
