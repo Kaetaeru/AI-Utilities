@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "request_id": "REQ-SERVER-0002",
+  "status": "complete",
+  "content_type": "text/markdown",
+  "answer": "PATIENT_ORACLE_SERVER_OK",
+  "completed_at": "2026-08-20T07:21:09.419268Z"
+}
