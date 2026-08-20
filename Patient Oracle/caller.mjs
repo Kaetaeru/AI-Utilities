@@ -1,6 +1,9 @@
 #!/usr/bin/env node
+import { ORACLE_QUEUE_PATH, appendQueueItem, emptyQueue, parseQueuePayload, queuePosition, removeQueueItem } from "./queue-protocol.js";
+
 const API_ROOT = "https://api.github.com";
 const RUNTIME_PATH = ".patient-oracle/runtime.json";
+const MAX_QUEUE_CAS_ATTEMPTS = 10;
 const [command = "", ...argv] = process.argv.slice(2);
 const args = parseArgs(argv);
 
@@ -17,7 +20,7 @@ async function main() {
     branch: String(args.branch || "main").trim() || "main",
     token: String(process.env.GITHUB_TOKEN || "").trim()
   };
-  if (!context.token) throw new Error("GITHUB_TOKEN is required");
+  validateToken(context.token);
   if (command === "enqueue") return print(await enqueue(context));
   if (command === "wait") return print(await wait(context, required("id")));
   const queued = await enqueue(context);
@@ -27,35 +30,120 @@ async function main() {
 async function enqueue(context) {
   const requestId = normalizeId(args.id || makeId());
   const prompt = required("prompt");
-  const runtimeFile = await getFile(context, RUNTIME_PATH);
-  const runtime = parseRuntime(runtimeFile.text);
-  if (runtime.status !== "complete") throw new Error(`runtime status is ${runtime.status}; only complete accepts a new request`);
+  const responseFormat = args["response-format"] ? String(args["response-format"]) : "";
   const requestPath = `.patient-oracle/requests/${requestId}.json`;
-  if (await getFile(context, requestPath, true)) throw new Error(`request ${requestId} already exists`);
-  const request = {
-    version: 1,
-    request_id: requestId,
-    prompt,
-    created_at: new Date().toISOString(),
-    ...(args["response-format"] ? { response_format: String(args["response-format"]) } : {})
-  };
-  await putFile(context, requestPath, request, `patient-oracle: enqueue ${requestId}`);
-  const nextRuntime = {
-    version: 1,
-    run_id: runtime.run_id,
-    revision: runtime.revision + 1,
-    status: "ready",
-    request_id: requestId,
-    reason: "queued by Patient Oracle caller",
-    updated_at: new Date().toISOString()
-  };
-  try {
-    await putFile(context, RUNTIME_PATH, nextRuntime, `patient-oracle: dispatch ${requestId}`, runtimeFile.sha);
-  } catch (error) {
-    if ([409, 422].includes(Number(error?.status))) throw new Error(`${requestPath} was created but runtime changed concurrently; do not overwrite runtime blindly`);
-    throw error;
+  const responsePath = `.patient-oracle/responses/${requestId}.json`;
+
+  if (await getFile(context, responsePath, true)) throw new Error(`request ${requestId} already has a durable response and cannot be reused`);
+
+  let request;
+  const existing = await getFile(context, requestPath, true);
+  if (existing) {
+    request = parseRequest(existing.text, requestId);
+    if (request.prompt !== prompt || String(request.response_format || "") !== responseFormat) throw new Error(`request ${requestId} already exists with different content`);
+  } else {
+    request = {
+      version: 1,
+      request_id: requestId,
+      prompt,
+      created_at: new Date().toISOString(),
+      ...(responseFormat ? { response_format: responseFormat } : {})
+    };
+    await putFile(context, requestPath, request, `patient-oracle: request ${requestId}`);
   }
-  return { request_id: requestId, status: "ready", runtime_revision: nextRuntime.revision };
+
+  const queued = await appendToQueue(context, requestId, request.created_at);
+  const activation = await tryActivateQueueHead(context);
+  const latestQueue = await getQueue(context);
+  const position = latestQueue ? queuePosition(latestQueue.queue, requestId) : 0;
+  const runtime = parseRuntime((await getFile(context, RUNTIME_PATH)).text);
+  const active = runtime.status === "ready" && runtime.request_id === requestId;
+  return {
+    request_id: requestId,
+    status: active ? "ready" : "queued",
+    queue_position: active ? 0 : (position || queued.position),
+    runtime_revision: active ? runtime.revision : null,
+    ...(activation.activated ? { activated_request_id: activation.requestId } : {})
+  };
+}
+
+async function appendToQueue(context, requestId, enqueuedAt) {
+  for (let attempt = 0; attempt < MAX_QUEUE_CAS_ATTEMPTS; attempt += 1) {
+    const file = await getFile(context, ORACLE_QUEUE_PATH, true);
+    const queue = file ? parseQueuePayload(file.text) : emptyQueue();
+    const result = appendQueueItem(queue, requestId, enqueuedAt);
+    if (!result.inserted) return { inserted: false, position: result.position };
+    try {
+      await putFile(context, ORACLE_QUEUE_PATH, result.queue, `patient-oracle: enqueue ${requestId}`, file?.sha || null);
+      return { inserted: true, position: result.position };
+    } catch (error) {
+      if (!isConflict(error)) throw error;
+      await sleep(100 + attempt * 50);
+    }
+  }
+  throw new Error(`could not append ${requestId} to Patient Oracle queue after concurrent updates`);
+}
+
+async function tryActivateQueueHead(context) {
+  for (let stale = 0; stale < 20; stale += 1) {
+    const runtimeFile = await getFile(context, RUNTIME_PATH);
+    const runtime = parseRuntime(runtimeFile.text);
+    if (runtime.status === "ready") return { activated: false, reason: "already_active", requestId: runtime.request_id };
+
+    const queueFile = await getQueue(context);
+    const head = queueFile?.queue.items[0];
+    if (!head) return { activated: false, reason: "queue_empty" };
+
+    if (await getFile(context, `.patient-oracle/responses/${head.request_id}.json`, true)) {
+      await removeFromQueue(context, head.request_id);
+      continue;
+    }
+
+    const requestFile = await getFile(context, `.patient-oracle/requests/${head.request_id}.json`, true);
+    if (!requestFile) return { activated: false, reason: "missing_request", requestId: head.request_id };
+
+    const nextRuntime = {
+      version: 1,
+      run_id: runtime.run_id,
+      revision: runtime.revision + 1,
+      status: "ready",
+      request_id: head.request_id,
+      reason: "activated from Patient Oracle FIFO queue",
+      updated_at: new Date().toISOString()
+    };
+    try {
+      await putFile(context, RUNTIME_PATH, nextRuntime, `patient-oracle: activate ${head.request_id}`, runtimeFile.sha);
+    } catch (error) {
+      if (isConflict(error)) return { activated: false, reason: "runtime_raced", requestId: head.request_id };
+      throw error;
+    }
+    await removeFromQueue(context, head.request_id);
+    return { activated: true, requestId: head.request_id, revision: nextRuntime.revision };
+  }
+  return { activated: false, reason: "too_many_stale_heads" };
+}
+
+async function removeFromQueue(context, requestId) {
+  for (let attempt = 0; attempt < MAX_QUEUE_CAS_ATTEMPTS; attempt += 1) {
+    const file = await getFile(context, ORACLE_QUEUE_PATH, true);
+    if (!file) return { removed: false };
+    const queue = parseQueuePayload(file.text);
+    const result = removeQueueItem(queue, requestId);
+    if (!result.removed) return { removed: false };
+    try {
+      await putFile(context, ORACLE_QUEUE_PATH, result.queue, `patient-oracle: dequeue ${requestId}`, file.sha);
+      return { removed: true };
+    } catch (error) {
+      if (!isConflict(error)) throw error;
+      await sleep(100 + attempt * 50);
+    }
+  }
+  return { removed: false, reason: "queue_conflict" };
+}
+
+async function getQueue(context) {
+  const file = await getFile(context, ORACLE_QUEUE_PATH, true);
+  return file ? { file, queue: parseQueuePayload(file.text) } : null;
 }
 
 async function wait(context, requestIdInput) {
@@ -95,6 +183,12 @@ async function putFile(context, path, value, message, sha = null) {
   if (!response.ok) throw await githubError(response, `write ${path}`);
 }
 
+function parseRequest(text, requestId) {
+  const value = parseObject(text, "request");
+  if (value.version !== 1 || value.request_id !== requestId || typeof value.prompt !== "string" || !value.prompt.trim() || typeof value.created_at !== "string" || !Number.isFinite(Date.parse(value.created_at))) throw new Error(`request ${requestId} is invalid`);
+  return value;
+}
+
 function parseRuntime(text) {
   const value = parseObject(text, "runtime");
   rejectUnknown(value, ["version","run_id","revision","status","request_id","reason","updated_at"], "runtime");
@@ -125,9 +219,11 @@ function makeId() { return `REQ-${new Date().toISOString().replace(/[-:.TZ]/g, "
 function writeUrl(context, path) { const encoded = path.split("/").map(encodeURIComponent).join("/"); return `${API_ROOT}/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repo)}/contents/${encoded}`; }
 function readUrl(context, path) { const url = new URL(writeUrl(context, path)); url.searchParams.set("ref", context.branch); return url.toString(); }
 function headers(token) { return { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "patient-oracle-caller" }; }
+function validateToken(token) { if (!token) throw new Error("GITHUB_TOKEN is required"); if (/[^\x21-\x7E]/.test(token)) throw new Error("GITHUB_TOKEN must be the actual ASCII token value"); }
 async function githubError(response, action) { let detail = ""; try { const body = await response.json(); detail = body?.message ? `: ${body.message}` : ""; } catch {} const error = new Error(`GitHub ${action} failed with HTTP ${response.status}${detail}`); error.status = response.status; return error; }
 function parseArgs(values) { const result = {}; for (let i=0;i<values.length;i+=1) { const token = values[i]; if (!token.startsWith("--")) throw new Error(`unexpected argument ${token}`); const key = token.slice(2); const next = values[i+1]; if (next === undefined || next.startsWith("--")) throw new Error(`missing value for --${key}`); result[key]=next; i+=1; } return result; }
 function required(name) { const value = String(args[name] || "").trim(); if (!value) throw new Error(`--${name} is required`); return value; }
 function numberArg(name, fallback, min, max) { if (args[name] === undefined) return fallback; const value = Number(args[name]); if (!Number.isFinite(value)) throw new Error(`--${name} must be numeric`); return Math.min(max, Math.max(min, Math.floor(value))); }
 function print(value) { console.log(JSON.stringify(value, null, 2)); }
+function isConflict(error) { return [409, 422].includes(Number(error?.status)); }
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
