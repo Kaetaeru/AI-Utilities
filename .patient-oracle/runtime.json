@@ -1,9 +1,9 @@
 {
   "version": 1,
   "run_id": "po-20260819T192038Z-7c4f9a2e",
-  "revision": 16,
-  "status": "ready",
+  "revision": 17,
+  "status": "complete",
   "request_id": "REQ-QUEUE-0002",
-  "reason": "activated from Patient Oracle FIFO queue",
-  "updated_at": "2026-08-20T07:36:16.401Z"
+  "reason": "completed through Patient Oracle response-file handoff",
+  "updated_at": "2026-08-20T07:36:46.288Z"
 }
