@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Patient Oracle</title>
   <style>
-    html,body{min-height:100%;background:#111;color:#eee}body{font:13px system-ui,sans-serif;margin:0;min-width:300px;width:auto}main{box-sizing:border-box;width:100%;padding:14px;display:grid;gap:12px}h1{font-size:17px;margin:0}p{margin:0;color:#aaa;line-height:1.4}label{display:grid;gap:5px;color:#bbb}input{box-sizing:border-box;width:100%;padding:8px;border:1px solid #444;border-radius:6px;background:#191919;color:#fff}.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}.status{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}.status div{background:#181818;padding:8px;border-radius:6px;min-width:0}.status span{display:block;color:#888;font-size:11px}.status strong{display:block;margin-top:3px;overflow-wrap:anywhere}button{padding:9px;border:0;border-radius:7px;font-weight:700;cursor:pointer}#save{background:#333;color:#fff}#toggle{background:#eee;color:#111}.error{color:#ff9b9b}.hint{font-size:11px}.row{display:flex;gap:8px}.row button{flex:1}@media(max-width:340px){.grid,.status{grid-template-columns:1fr}.row{flex-direction:column}}
+    html,body{min-height:100%;background:#111;color:#eee}body{font:13px system-ui,sans-serif;margin:0;min-width:300px;width:auto}main{box-sizing:border-box;width:100%;padding:14px;display:grid;gap:12px}h1{font-size:17px;margin:0}p{margin:0;color:#aaa;line-height:1.4}label{display:grid;gap:5px;color:#bbb}input{box-sizing:border-box;width:100%;padding:8px;border:1px solid #444;border-radius:6px;background:#191919;color:#fff}.check{display:flex;grid-template-columns:none;align-items:flex-start;gap:8px;padding:10px;background:#181818;border-radius:7px}.check input{width:auto;margin-top:2px}.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}.status{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}.status div{background:#181818;padding:8px;border-radius:6px;min-width:0}.status span{display:block;color:#888;font-size:11px}.status strong{display:block;margin-top:3px;overflow-wrap:anywhere}button{padding:9px;border:0;border-radius:7px;font-weight:700;cursor:pointer}#save{background:#333;color:#fff}#toggle{background:#eee;color:#111}.error{color:#ff9b9b}.hint{font-size:11px}.row{display:flex;gap:8px}.row button{flex:1}@media(max-width:340px){.grid,.status{grid-template-columns:1fr}.row{flex-direction:column}}
   </style>
 </head>
 <body>
@@ -14,14 +14,16 @@
   <label>Owner<input id="owner" autocomplete="off" /></label>
   <label>Repository<input id="repo" autocomplete="off" /></label>
   <label>Branch<input id="branch" value="main" autocomplete="off" /></label>
-  <label>GitHub token <span class="hint">required for Patient Oracle 0.2</span><input id="token" type="password" autocomplete="off" /></label>
+  <label>GitHub token <span class="hint">required; stored in Chrome local extension storage</span><input id="token" type="password" autocomplete="off" /></label>
   <label>Runtime path<input id="path" value=".patient-oracle/runtime.json" autocomplete="off" /></label>
   <div class="grid">
     <label>Poll seconds<input id="poll" type="number" min="5" value="90" /></label>
     <label>Max dispatches<input id="max" type="number" min="1" max="20" value="6" /></label>
   </div>
+  <label class="check"><input id="server" type="checkbox" /><span><strong>Server Mode</strong><br><span class="hint">Keep this stream running on a dedicated pinned ChatGPT worker tab. Chrome startup and worker-tab closure are recovered automatically.</span></span></label>
   <div class="status">
     <div><span>Status</span><strong id="status">-</strong></div>
+    <div><span>Server</span><strong id="serverStatus">Off</strong></div>
     <div><span>Request</span><strong id="request">-</strong></div>
     <div><span>Revision</span><strong id="revision">-</strong></div>
     <div><span>Dispatches</span><strong id="dispatches">0</strong></div>
@@ -30,7 +32,7 @@
   </div>
   <p id="error" class="error" hidden></p>
   <div class="row"><button id="save">Save</button><button id="toggle">Start Oracle</button></div>
-  <p class="hint">This Side Panel stays open while you work. A non-empty ChatGPT draft is never overwritten; Patient Oracle waits and retries.</p>
+  <p class="hint">Server Mode can recover Chrome/service-worker restarts and a closed worker tab once Chrome itself is running. Configure Windows to launch Chrome at sign-in if you want reboot recovery.</p>
   <p class="hint">Normal Patient Oracle work does not use the ChatGPT GitHub plugin. GitHub reads and writes are performed by the extension.</p>
 </main>
 <script type="module" src="popup.js"></script>
