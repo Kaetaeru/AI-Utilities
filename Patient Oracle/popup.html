@@ -20,7 +20,7 @@
     <label>Poll seconds<input id="poll" type="number" min="5" value="90" /></label>
     <label>Max dispatches<input id="max" type="number" min="1" max="20" value="6" /></label>
   </div>
-  <label class="check"><input id="server" type="checkbox" /><span><strong>Server Mode</strong><br><span class="hint">Keep this stream running on a dedicated pinned ChatGPT worker tab. Chrome startup and worker-tab closure are recovered automatically.</span></span></label>
+  <label class="check"><input id="server" type="checkbox" /><span><strong>Server Mode</strong><br><span class="hint">Persistent worker mode preference. Start/Stop is a separate user command and is never changed by recovery logic.</span></span></label>
   <div class="status">
     <div><span>Status</span><strong id="status">-</strong></div>
     <div><span>Server</span><strong id="serverStatus">Off</strong></div>
@@ -32,6 +32,7 @@
   </div>
   <p id="error" class="error" hidden></p>
   <div class="row"><button id="save">Save</button><button id="toggle">Start Oracle</button></div>
+  <p class="hint">Start/Stop is the user's command latch. Only clicking this button changes it. Status above reports the actual worker state and may show failures without changing Start/Stop.</p>
   <p class="hint">Server Mode can recover Chrome/service-worker restarts and a closed worker tab once Chrome itself is running. Configure Windows to launch Chrome at sign-in if you want reboot recovery.</p>
   <p class="hint">Normal Patient Oracle work does not use the ChatGPT GitHub plugin. GitHub reads and writes are performed by the extension.</p>
 </main>
