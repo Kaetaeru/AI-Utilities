@@ -1,4 +1,5 @@
 import "./background.js";
+import "./server-mode.js";
 
 async function enableActionSidePanel() {
   try {
