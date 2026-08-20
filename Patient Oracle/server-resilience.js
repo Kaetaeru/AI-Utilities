@@ -1,6 +1,7 @@
 import { DEFAULT_STATE, stateKey } from "./control.js";
 
 const SERVER_CONFIG_KEY = "patientOracleServerConfig";
+const USER_INTENT_KEY = "patientOracleUserIntent";
 const RETRYABLE_STOP_REASONS = new Set([
   "dispatch_failed",
   "20_minute_hard_stop"
@@ -12,6 +13,7 @@ chrome.runtime.onStartup.addListener(() => { void enforceConfiguredWorker("chrom
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (changes[SERVER_CONFIG_KEY]?.newValue?.enabled) void enforceConfiguredWorker("server_config_enabled");
+  if (changes[USER_INTENT_KEY]?.newValue?.started === true) void enforceConfiguredWorker("user_started");
   for (const [key, change] of Object.entries(changes)) {
     if (!key.startsWith("patientOracleState:")) continue;
     const tabId = Number(key.slice("patientOracleState:".length));
@@ -21,9 +23,11 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 });
 
 async function enforceConfiguredWorker(trigger) {
-  const stored = await chrome.storage.local.get(SERVER_CONFIG_KEY);
+  const stored = await chrome.storage.local.get([SERVER_CONFIG_KEY, USER_INTENT_KEY]);
   const server = normalizeServerConfig(stored[SERVER_CONFIG_KEY]);
+  const intent = normalizeUserIntent(stored[USER_INTENT_KEY]);
   if (!server.enabled || !Number.isSafeInteger(server.workerTabId)) return { action: "disabled", trigger };
+  if (!intent.started) return { action: "user_stopped", trigger };
   const stateStore = await chrome.storage.local.get(stateKey(server.workerTabId));
   const state = stateStore[stateKey(server.workerTabId)];
   if (!state || state.enabled !== false) return { action: "healthy", trigger };
@@ -34,20 +38,21 @@ async function protectServerWorker(tabId, stoppedState, trigger) {
   if (repairInFlight.has(tabId)) return { action: "repair_in_flight", trigger };
   repairInFlight.add(tabId);
   try {
-    const stored = await chrome.storage.local.get([SERVER_CONFIG_KEY, stateKey(tabId)]);
+    const stored = await chrome.storage.local.get([SERVER_CONFIG_KEY, USER_INTENT_KEY, stateKey(tabId)]);
     const server = normalizeServerConfig(stored[SERVER_CONFIG_KEY]);
+    const intent = normalizeUserIntent(stored[USER_INTENT_KEY]);
     if (!server.enabled || server.workerTabId !== tabId) return { action: "not_server_worker", trigger };
+    if (!intent.started) return { action: "user_stopped", trigger };
 
     const current = { ...DEFAULT_STATE, ...(stored[stateKey(tabId)] || stoppedState || {}) };
     if (current.enabled) return { action: "already_enabled", trigger };
-    if (current.stopReason === "manual") return { action: "manual_stop", trigger };
 
     const stopReason = String(current.stopReason || "unexpected_stop");
     const retryable = RETRYABLE_STOP_REASONS.has(stopReason);
     const status = retryable ? "waiting_for_dispatch_retry" : "needs_user";
     const reason = retryable
-      ? `Server Mode kept Patient Oracle started after ${stopReason}; automatic recovery remains active.`
-      : `Server Mode kept Patient Oracle started after ${stopReason}; intervention may be required, but the server watchdog remains enabled.`;
+      ? `User Start remains latched after ${stopReason}; automatic recovery remains active.`
+      : `User Start remains latched after ${stopReason}; intervention may be required, but the server watchdog remains enabled.`;
 
     const repaired = {
       ...current,
@@ -76,9 +81,10 @@ async function protectServerWorker(tabId, stoppedState, trigger) {
 }
 
 async function recycleWorkerTab(tabId) {
-  const stored = await chrome.storage.local.get(SERVER_CONFIG_KEY);
+  const stored = await chrome.storage.local.get([SERVER_CONFIG_KEY, USER_INTENT_KEY]);
   const server = normalizeServerConfig(stored[SERVER_CONFIG_KEY]);
-  if (!server.enabled || server.workerTabId !== tabId) return;
+  const intent = normalizeUserIntent(stored[USER_INTENT_KEY]);
+  if (!server.enabled || server.workerTabId !== tabId || !intent.started) return;
   try { await chrome.tabs.remove(tabId); } catch {}
 }
 
@@ -87,5 +93,12 @@ function normalizeServerConfig(value) {
   return {
     enabled: Boolean(value?.enabled),
     workerTabId: Number.isSafeInteger(workerTabId) ? workerTabId : null
+  };
+}
+
+function normalizeUserIntent(value) {
+  return {
+    started: Boolean(value?.started),
+    changedAt: typeof value?.changedAt === "string" ? value.changedAt : null
   };
 }
