@@ -2,7 +2,7 @@
 
 ## Durable source of truth
 
-GitHub is the only durable source of truth for Patient Oracle request state, checkpoints, responses, and completion state. ChatGPT conversation state, assistant DOM text, and generated-file links are disposable transport/execution state and are never the durable response channel.
+GitHub is the only durable source of truth for Patient Oracle queue state, request state, checkpoints, responses, and completion state. ChatGPT conversation state, assistant DOM text, and generated-file links are disposable transport/execution state and are never the durable response channel.
 
 The durable layout is:
 
@@ -10,12 +10,39 @@ The durable layout is:
 .patient-oracle/
 ├── CONTRACT.md
 ├── runtime.json
+├── queue.json
 ├── requests/<request_id>.json
 ├── responses/<request_id>.json
 └── checkpoints/<request_id>/revision-<revision>.json
 ```
 
-Requests live at `.patient-oracle/requests/<request_id>.json`. Terminal responses live at `.patient-oracle/responses/<request_id>.json`. Continuation checkpoints live under `.patient-oracle/checkpoints/<request_id>/`.
+Requests live at `.patient-oracle/requests/<request_id>.json`. Pending FIFO requests live in `.patient-oracle/queue.json`. Terminal responses live at `.patient-oracle/responses/<request_id>.json`. Continuation checkpoints live under `.patient-oracle/checkpoints/<request_id>/`.
+
+## FIFO queue
+
+`.patient-oracle/queue.json` is a versioned FIFO list of requests that are durable but not currently selected by `runtime.json`.
+
+The queue envelope is:
+
+```json
+{
+  "version": 1,
+  "revision": 3,
+  "items": [
+    { "request_id": "REQ-002", "enqueued_at": "2026-08-20T07:00:00Z" },
+    { "request_id": "REQ-003", "enqueued_at": "2026-08-20T07:00:01Z" }
+  ],
+  "updated_at": "2026-08-20T07:00:01Z"
+}
+```
+
+Queue writes use the GitHub file SHA as an optimistic concurrency token. Concurrent callers must retry on content conflicts rather than overwriting each other. Request IDs may appear at most once in the queue.
+
+A caller writes the immutable request file first and only then appends its identity to the queue. If no request is active, a caller or the Server Mode queue worker may activate the FIFO head.
+
+Activation preserves the single-active-request invariant. The activator first writes a higher SHA-protected `ready` `runtime.json` revision for the FIFO head and only then removes that request from `queue.json`. This ordering favors a harmless stale queue entry over request loss. If activation succeeds but dequeue cleanup is interrupted, reconciliation recognizes an already-active or already-completed head and removes the stale queue entry later.
+
+`runtime.json` selects at most one active request. FIFO queueing does not authorize parallel ChatGPT execution on one stream.
 
 ## Browser-to-GitHub handoff
 
@@ -27,11 +54,11 @@ Ordinary assistant message text is ignored by the protocol. The extension may in
 
 ## Runtime handoff
 
-`.patient-oracle/runtime.json` is the final authoritative handoff write for every durable state transition. Any response or checkpoint artifact required by a transition must be written and verified before `runtime.json` is updated.
+`.patient-oracle/runtime.json` is the final authoritative handoff write for every active-request state transition. Any response or checkpoint artifact required by a transition must be written and verified before `runtime.json` is updated.
 
 `revision` is monotonic within a `run_id`. A worker must never accept or dispatch a revision lower than one it has already observed for the same run. A revision already dispatched by that worker must not be dispatched again.
 
-A `ready` runtime requires a non-empty `request_id`. Terminal statuses are `complete`, `needs_user`, and `blocked`. A terminal runtime may omit `request_id` only for the initialized idle state waiting for the first caller request.
+A `ready` runtime requires a non-empty `request_id`. Terminal statuses are `complete`, `needs_user`, and `blocked`. A terminal runtime may omit `request_id` only for the initialized idle state waiting for the first queued request.
 
 ## Response-file envelope
 
@@ -53,6 +80,12 @@ Redispatch of the same request is bounded by a local circuit breaker. Exceeding 
 
 If repository coordinates, branch, or runtime path change while a worker is active, the worker stops rather than silently switching streams.
 
+## User Start/Stop intent
+
+The Side Panel Start/Stop control represents user intent, not worker health. Only an explicit user button action changes that intent latch. Dispatch failures, watchdog recovery, browser restarts, queue activation, and other operational state changes must never flip the Start/Stop control on the user's behalf.
+
+When user intent is Start, operational recovery may restore the worker while the UI remains latched Start. When user intent is Stop, queue entries may remain durable but the server worker must not execute them until the user explicitly starts Patient Oracle again.
+
 ## Browser safety
 
 A non-empty ChatGPT composer is user-owned state and must never be overwritten. Patient Oracle may submit only into an empty composer. If a user draft is present, the worker remains enabled and waits for the composer to become empty.
@@ -69,6 +102,8 @@ GitHub reads should use conditional requests when practical. On HTTP 403 or 429 
 
 Durable history is not overwritten silently. If a response/checkpoint path already exists with different content, or if `runtime.json` changes concurrently before the final authoritative write, the worker stops instead of clobbering newer state.
 
+Queue updates are also conflict-safe. Enqueue and dequeue operations retry after GitHub SHA conflicts and never replace a newer queue snapshot blindly.
+
 ## 20-minute execution law
 
 Each Patient Oracle ChatGPT turn has a hard execution budget of 20 minutes.
@@ -79,8 +114,12 @@ If the request cannot be safely completed before the hard stop, the worker must 
 
 The worker ends before 20 minutes. Any terminal response artifact required for `complete`, `needs_user`, or `blocked` is written to GitHub and verified before the corresponding terminal `runtime.json` revision is written last.
 
+After a terminal active-request transition, the Server Mode queue worker may activate the next FIFO item with a new higher `ready` runtime revision.
+
 ## Caller ordering
 
-For a new request, the caller writes `.patient-oracle/requests/<request_id>.json` first and only then publishes the higher `ready` runtime revision last. Request identities are immutable.
+For a new request, the caller writes `.patient-oracle/requests/<request_id>.json` first and then appends the request to `.patient-oracle/queue.json` using SHA-protected conflict handling. Request identities are immutable.
+
+If runtime is terminal, the caller may opportunistically activate the FIFO head. Activation always selects the head, never a later request, and writes the higher `ready` runtime revision before dequeue cleanup.
 
 For terminal completion, Patient Oracle writes `.patient-oracle/responses/<request_id>.json` first, verifies it, and only then publishes the higher terminal runtime revision last.
