@@ -6,6 +6,8 @@ Patient Oracle is a standalone Chrome extension and GitHub-backed request/respon
 
 Patient Oracle does **not** use the ChatGPT GitHub plugin for worker execution. GitHub remains the only durable source of truth; generated ChatGPT files are transient handoff artifacts.
 
+> **AI callers / automation:** start with [`AI_API_GUIDE.md`](./AI_API_GUIDE.md). It documents the deployed branch coordinates, `ask` / `enqueue` / `wait` interface, FIFO behavior, return shapes, Start/Stop semantics, and failure-handling rules for another AI agent.
+
 ## Flow
 
 ```text
@@ -80,6 +82,7 @@ A successful ChatGPT handoff looks like:
 
 ## Files
 
+- `AI_API_GUIDE.md` — caller/operator guide written for another AI agent using the dedicated sub-PC API-like worker.
 - `manifest.json` — Manifest V3 extension using a persistent Chrome Side Panel.
 - `sidepanel-background.js` — loads scheduler, Server Mode recovery, FIFO queue worker, and Side Panel behavior.
 - `background.js` — active-request scheduler, durable response/checkpoint writes, revision/rate-limit safety, and fresh-chat dispatch.
