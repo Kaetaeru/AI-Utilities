@@ -1,9 +1,9 @@
 {
   "version": 1,
   "run_id": "po-20260819T192038Z-7c4f9a2e",
-  "revision": 10,
-  "status": "ready",
+  "revision": 11,
+  "status": "complete",
   "request_id": "REQ-SERVER-0001",
-  "reason": "queued by Patient Oracle caller",
-  "updated_at": "2026-08-20T06:37:40.805Z"
+  "reason": "completed through Patient Oracle response-file handoff",
+  "updated_at": "2026-08-20T07:07:19.076Z"
 }
