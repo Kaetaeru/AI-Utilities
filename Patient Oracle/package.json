@@ -1,11 +1,13 @@
 {
   "name": "patient-oracle",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check sidepanel-background.js && node --check background.js && node --check server-mode.js && node --check server-resilience.js && node --check content.js && node --check artifact-preview-v2.js && node --check control.js && node --check popup.js && node --check caller.mjs",
+    "check": "node --check sidepanel-background.js && node --check background.js && node --check server-mode.js && node --check server-resilience.js && node --check queue-protocol.js && node --check queue-worker.js && node --check content.js && node --check artifact-preview-v2.js && node --check control.js && node --check popup.js && node --check caller.mjs",
     "test": "node --test",
-    "oracle:ask": "node caller.mjs ask"
+    "oracle:ask": "node caller.mjs ask",
+    "oracle:enqueue": "node caller.mjs enqueue",
+    "oracle:wait": "node caller.mjs wait"
   }
 }
