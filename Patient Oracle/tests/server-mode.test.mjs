@@ -36,3 +36,9 @@ test("Side Panel can opt into persistent Server Mode", () => {
   assert.match(popup, /disableServerModeForThisTab/);
   assert.match(popup, /pinned: true, autoDiscardable: false/);
 });
+
+test("server recovery finalizes an already durable response instead of rerunning it", () => {
+  assert.match(server, /responsePath\(runtime\.request_id\)/);
+  assert.match(server, /server recovery found durable response artifact/);
+  assert.match(server, /could not verify terminal recovery from durable response/);
+});
