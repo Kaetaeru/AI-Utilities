@@ -1,10 +1,12 @@
 import { DEFAULT_CONFIG, DEFAULT_STATE } from "./control.js";
 
+const SERVER_CONFIG_KEY = "patientOracleServerConfig";
+const SERVER_STATE_KEY = "patientOracleServerState";
 const port = chrome.runtime.connect({ name: "patient-oracle-panel" });
 let counter = 0;
 const pending = new Map();
 const tab = await getActiveChatGptTab();
-const ui = Object.fromEntries(["owner","repo","branch","token","path","poll","max","status","request","revision","dispatches","checkpoint","hardstop","error","save","toggle"].map((id) => [id, document.getElementById(id)]));
+const ui = Object.fromEntries(["owner","repo","branch","token","path","poll","max","server","serverStatus","status","request","revision","dispatches","checkpoint","hardstop","error","save","toggle"].map((id) => [id, document.getElementById(id)]));
 
 port.onMessage.addListener((message) => {
   const entry = pending.get(String(message?.requestId || ""));
@@ -30,19 +32,34 @@ async function load() {
   ui.path.value = config.path;
   ui.poll.value = String(config.pollIntervalSeconds);
   ui.max.value = String(config.maxRedispatchesPerRequest);
-  render(snapshot.state || DEFAULT_STATE);
+  const server = await getServerConfig();
+  ui.server.checked = Boolean(server.enabled && Number(server.workerTabId) === tab.id);
+  render(snapshot.state || DEFAULT_STATE, server);
+}
+
+function formConfig() {
+  return {
+    owner: ui.owner.value,
+    repo: ui.repo.value,
+    branch: ui.branch.value,
+    githubToken: ui.token.value,
+    path: ui.path.value,
+    pollIntervalSeconds: ui.poll.value,
+    maxRedispatchesPerRequest: ui.max.value
+  };
 }
 
 async function save() {
   const state = (await request("PATIENT_ORACLE_STATUS")).state || DEFAULT_STATE;
   if (state.enabled) throw new Error("Stop Patient Oracle before changing settings");
-  await request("PATIENT_ORACLE_SAVE", { config: { owner: ui.owner.value, repo: ui.repo.value, branch: ui.branch.value, githubToken: ui.token.value, path: ui.path.value, pollIntervalSeconds: ui.poll.value, maxRedispatchesPerRequest: ui.max.value } });
+  await request("PATIENT_ORACLE_SAVE", { config: formConfig() });
   await refresh();
 }
 
 async function toggle() {
   const snapshot = await request("PATIENT_ORACLE_STATUS");
   if (snapshot.state?.enabled) {
+    await disableServerModeForThisTab();
     await request("PATIENT_ORACLE_STOP");
   } else {
     await save();
@@ -51,8 +68,53 @@ async function toggle() {
     if (started?.reason === "already_dispatched") {
       throw new Error("This ready revision was already dispatched locally. Stop and Start Oracle again to publish a safe higher retry revision.");
     }
+    if (ui.server.checked) {
+      const after = await request("PATIENT_ORACLE_STATUS");
+      await enableServerMode(after.config || formConfig(), after.state || DEFAULT_STATE);
+    }
   }
   await refresh();
+}
+
+async function enableServerMode(config, state) {
+  validateGitHubToken(config.githubToken);
+  const now = new Date().toISOString();
+  await chrome.storage.local.set({
+    [SERVER_CONFIG_KEY]: {
+      version: 1,
+      enabled: true,
+      workerTabId: tab.id,
+      config: { ...DEFAULT_CONFIG, ...config },
+      updatedAt: now
+    },
+    [SERVER_STATE_KEY]: {
+      version: 1,
+      workerTabId: tab.id,
+      savedAt: now,
+      state: { ...DEFAULT_STATE, ...state }
+    }
+  });
+  await chrome.tabs.update(tab.id, { pinned: true, autoDiscardable: false });
+}
+
+async function disableServerModeForThisTab() {
+  const server = await getServerConfig();
+  if (!server.enabled || Number(server.workerTabId) !== tab.id) return;
+  await chrome.storage.local.set({
+    [SERVER_CONFIG_KEY]: { ...server, enabled: false, updatedAt: new Date().toISOString() }
+  });
+}
+
+async function getServerConfig() {
+  const stored = await chrome.storage.local.get(SERVER_CONFIG_KEY);
+  const value = stored[SERVER_CONFIG_KEY] || {};
+  return {
+    version: 1,
+    enabled: Boolean(value.enabled),
+    workerTabId: value.workerTabId ?? null,
+    config: { ...DEFAULT_CONFIG, ...(value.config || {}) },
+    updatedAt: value.updatedAt || null
+  };
 }
 
 async function recoverAlreadyDispatchedReadyRevision() {
@@ -158,9 +220,18 @@ async function githubError(response, action) {
   return new Error(`GitHub ${action} failed with HTTP ${response.status}${detail}`);
 }
 
-async function refresh() { try { const snapshot = await request("PATIENT_ORACLE_STATUS"); render(snapshot.state || DEFAULT_STATE); } catch (error) { showError(error); } }
-function render(state) {
+async function refresh() {
+  try {
+    const [snapshot, server] = await Promise.all([request("PATIENT_ORACLE_STATUS"), getServerConfig()]);
+    render(snapshot.state || DEFAULT_STATE, server);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function render(state, server = { enabled: false, workerTabId: null }) {
   ui.status.textContent = displayStatus(state);
+  ui.serverStatus.textContent = server.enabled ? (Number(server.workerTabId) === tab.id ? "On · this tab" : `On · tab ${server.workerTabId}`) : "Off";
   ui.request.textContent = state.currentRequestId || "-";
   ui.revision.textContent = Number(state.lastRevision) >= 0 ? String(state.lastRevision) : "-";
   ui.dispatches.textContent = String(state.requestDispatchCount || 0);
@@ -191,10 +262,50 @@ function displayStatus(state) {
   };
   return labels[state.lastStatus] || state.lastStatus || (state.enabled ? "Watching" : "Stopped");
 }
-function request(type, extra = {}) { const requestId = `panel-${Date.now()}-${++counter}`; return new Promise((resolve, reject) => { const timer = setTimeout(() => { pending.delete(requestId); reject(new Error("Patient Oracle request timed out")); }, 25000); pending.set(requestId, { resolve, reject, timer }); port.postMessage({ type, requestId, tabId: tab.id, ...extra }); }); }
-async function run(fn) { ui.save.disabled = true; ui.toggle.disabled = true; hideError(); try { await fn(); } catch (error) { showError(error); } finally { ui.toggle.disabled = false; await refresh(); } }
-async function getActiveChatGptTab() { const [active] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!active?.id || !isChatGptUrl(active.url || "")) throw new Error("Open the Patient Oracle Side Panel from an active ChatGPT tab"); return active; }
-function isChatGptUrl(url) { try { const host = new URL(url).hostname; return host === "chatgpt.com" || host === "chat.openai.com"; } catch { return false; } }
-function formatTime(value) { if (!value) return "-"; const d = new Date(value); return Number.isNaN(d.getTime()) ? "-" : d.toLocaleTimeString(); }
-function showError(error) { ui.error.hidden = false; ui.error.textContent = error instanceof Error ? error.message : String(error); }
-function hideError() { ui.error.hidden = true; ui.error.textContent = ""; }
+
+function request(type, extra = {}) {
+  const requestId = `panel-${Date.now()}-${++counter}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { pending.delete(requestId); reject(new Error("Patient Oracle request timed out")); }, 25000);
+    pending.set(requestId, { resolve, reject, timer });
+    port.postMessage({ type, requestId, tabId: tab.id, ...extra });
+  });
+}
+
+async function run(fn) {
+  ui.save.disabled = true;
+  ui.toggle.disabled = true;
+  hideError();
+  try { await fn(); } catch (error) { showError(error); } finally { ui.toggle.disabled = false; await refresh(); }
+}
+
+async function getActiveChatGptTab() {
+  const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!active?.id || !isChatGptUrl(active.url || "")) throw new Error("Open the Patient Oracle Side Panel from an active ChatGPT tab");
+  return active;
+}
+
+function isChatGptUrl(url) {
+  try {
+    const host = new URL(url).hostname;
+    return host === "chatgpt.com" || host === "chat.openai.com";
+  } catch {
+    return false;
+  }
+}
+
+function formatTime(value) {
+  if (!value) return "-";
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? "-" : d.toLocaleTimeString();
+}
+
+function showError(error) {
+  ui.error.hidden = false;
+  ui.error.textContent = error instanceof Error ? error.message : String(error);
+}
+
+function hideError() {
+  ui.error.hidden = true;
+  ui.error.textContent = "";
+}
