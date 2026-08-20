@@ -1,6 +1,7 @@
 import "./background.js";
 import "./server-mode.js";
 import "./server-resilience.js";
+import "./queue-worker.js";
 
 async function enableActionSidePanel() {
   try {
