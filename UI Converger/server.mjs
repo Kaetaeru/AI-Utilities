@@ -6,7 +6,12 @@ import { fileURLToPath } from "node:url";
 import { parseBlueprint, buildPlanPrompt, buildPatchPrompt, parsePlanAnswer, parsePatchAnswer } from "./src/protocol.mjs";
 import { scanRepository } from "./src/repo-scan.mjs";
 import { captureDomSnapshot } from "./src/dom-snapshot.mjs";
-import { askPatientOracle } from "./src/oracle.mjs";
+import {
+  DEFAULT_ORACLE_COORDINATES,
+  askPatientOracle,
+  waitPatientOracle,
+  makeOracleRequestId
+} from "./src/oracle.mjs";
 import { createSessionBranch, applyPatchAndCommit, lastCommitDiff } from "./src/apply.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -17,7 +22,11 @@ const MAX_BODY_BYTES = 3 * 1024 * 1024;
 
 const server = http.createServer(async (req, res) => {
   try {
-    if (req.method === "GET" && req.url === "/api/health") return json(res, 200, { ok: true, patient_oracle_token: Boolean(process.env.GITHUB_TOKEN) });
+    if (req.method === "GET" && req.url === "/api/health") return json(res, 200, {
+      ok: true,
+      patient_oracle_token: Boolean(process.env.GITHUB_TOKEN),
+      patient_oracle_mailbox: DEFAULT_ORACLE_COORDINATES
+    });
     if (req.method === "POST" && req.url === "/api/session/start") return handleStart(req, res);
     if (req.method === "POST" && req.url === "/api/session/plan") return handlePlan(req, res);
     if (req.method === "POST" && req.url === "/api/session/iterate") return handleIterate(req, res);
@@ -25,12 +34,19 @@ const server = http.createServer(async (req, res) => {
     return json(res, 404, { error: "Not found" });
   } catch (error) {
     console.error(error);
-    return json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+    return json(res, Number(error?.statusCode) || 500, {
+      error: error instanceof Error ? error.message : String(error),
+      ...(error?.code ? { code: error.code } : {}),
+      ...(error?.requestId ? { request_id: error.requestId } : {}),
+      ...(error?.oracleStatus ? { oracle_status: error.oracleStatus } : {}),
+      ...(error?.reason ? { reason: error.reason } : {})
+    });
   }
 });
 
 server.listen(PORT, HOST, () => {
   console.log(`UI Converger listening on http://${HOST}:${PORT}`);
+  console.log(`Patient Oracle mailbox: ${DEFAULT_ORACLE_COORDINATES.owner}/${DEFAULT_ORACLE_COORDINATES.repo}@${DEFAULT_ORACLE_COORDINATES.branch}`);
   console.log("Patient Oracle uses GITHUB_TOKEN from this process environment.");
 });
 
@@ -61,6 +77,8 @@ async function handleStart(req, res) {
     repoContext,
     domSnapshot,
     plan: null,
+    planRevision: 0,
+    pendingOracle: null,
     iteration: 0,
     history: [],
     createdAt: new Date().toISOString()
@@ -72,6 +90,7 @@ async function handleStart(req, res) {
 async function handlePlan(req, res) {
   const body = await readJson(req);
   const session = requireSession(body.sessionId);
+  assertPendingKind(session, "plan");
   session.repoContext = await scanRepository(session.repoRoot);
   session.domSnapshot = await captureDomSnapshot(session.previewUrl, {
     ...session.viewport,
@@ -84,18 +103,32 @@ async function handlePlan(req, res) {
     protectedPaths: session.protectedPaths,
     userIntent: session.userIntent
   });
-  const oracleResult = await askPatientOracle({ ...session.oracle, prompt, responseFormat: "application/json" });
+  const planRevision = session.pendingOracle?.kind === "plan"
+    ? session.pendingOracle.ordinal
+    : session.planRevision + 1;
+  const requestId = makeOracleRequestId(session.id, "plan", planRevision);
+  const oracleResult = await resolveOracleRequest(session, {
+    kind: "plan",
+    ordinal: planRevision,
+    requestId,
+    prompt,
+    responseFormat: "application/json"
+  });
   session.plan = parsePlanAnswer(oracleResult.answer);
-  return json(res, 200, { request_id: oracleResult.requestId, plan: session.plan });
+  session.planRevision = planRevision;
+  return json(res, 200, { request_id: oracleResult.requestId, plan_revision: planRevision, plan: session.plan, session: publicSession(session) });
 }
 
 async function handleIterate(req, res) {
   const body = await readJson(req);
   const session = requireSession(body.sessionId);
   if (!session.plan) throw new Error("Create and inspect a plan before running an iteration");
+  assertPendingKind(session, "iteration");
   session.repoContext = await scanRepository(session.repoRoot);
   if (!session.repoContext.clean) throw new Error(`Repository changed outside UI Converger: ${session.repoContext.dirty.slice(0, 10).join(", ")}`);
-  const nextIteration = session.iteration + 1;
+  const nextIteration = session.pendingOracle?.kind === "iteration"
+    ? session.pendingOracle.ordinal
+    : session.iteration + 1;
   const beforeSnapshot = await captureDomSnapshot(session.previewUrl, {
     ...session.viewport,
     screenshotPath: path.join(session.repoRoot, ".ui-converger", "captures", `${session.id}-iteration-${nextIteration}-before.png`)
@@ -109,7 +142,14 @@ async function handleIterate(req, res) {
     userIntent: session.userIntent,
     iteration: nextIteration
   });
-  const oracleResult = await askPatientOracle({ ...session.oracle, prompt, responseFormat: "application/json" });
+  const requestId = makeOracleRequestId(session.id, "iteration", nextIteration);
+  const oracleResult = await resolveOracleRequest(session, {
+    kind: "iteration",
+    ordinal: nextIteration,
+    requestId,
+    prompt,
+    responseFormat: "application/json"
+  });
   const patch = parsePatchAnswer(oracleResult.answer);
   const applied = await applyPatchAndCommit(session.repoRoot, patch, {
     iteration: nextIteration,
@@ -146,6 +186,45 @@ async function handleIterate(req, res) {
   });
 }
 
+async function resolveOracleRequest(session, { kind, ordinal, requestId, prompt, responseFormat }) {
+  const pending = session.pendingOracle;
+  if (pending && (pending.kind !== kind || pending.requestId !== requestId)) {
+    throw new Error(`Patient Oracle request ${pending.requestId} is still pending; resume it before starting another request`);
+  }
+  if (!pending) {
+    session.pendingOracle = { kind, ordinal, requestId, startedAt: new Date().toISOString() };
+  }
+  let result;
+  try {
+    result = pending
+      ? await waitPatientOracle({ ...session.oracle, requestId })
+      : await askPatientOracle({ ...session.oracle, requestId, prompt, responseFormat });
+  } catch (error) {
+    if (error?.code === "PATIENT_ORACLE_TIMEOUT") throw error;
+    session.pendingOracle = null;
+    throw error;
+  }
+  session.pendingOracle = null;
+  if (result.status !== "complete") throw oracleTerminalError(result);
+  return result;
+}
+
+function oracleTerminalError(result) {
+  const error = new Error(`Patient Oracle returned ${result.status}: ${result.reason}`);
+  error.code = `PATIENT_ORACLE_${String(result.status).toUpperCase()}`;
+  error.statusCode = 409;
+  error.requestId = result.requestId;
+  error.oracleStatus = result.status;
+  error.reason = result.reason;
+  return error;
+}
+
+function assertPendingKind(session, kind) {
+  if (session.pendingOracle && session.pendingOracle.kind !== kind) {
+    throw new Error(`Patient Oracle request ${session.pendingOracle.requestId} is still pending; finish ${session.pendingOracle.kind} before starting ${kind}`);
+  }
+}
+
 function compactRepoContext(context) {
   return {
     branch: context.branch,
@@ -167,7 +246,13 @@ function publicSession(session) {
     framework: session.repoContext.framework,
     context_files: session.repoContext.context_file_count,
     iteration: session.iteration,
+    plan_revision: session.planRevision,
     has_plan: Boolean(session.plan),
+    pending_oracle: session.pendingOracle ? {
+      kind: session.pendingOracle.kind,
+      request_id: session.pendingOracle.requestId,
+      started_at: session.pendingOracle.startedAt
+    } : null,
     protected_paths: session.protectedPaths,
     history: session.history
   };
@@ -185,10 +270,9 @@ function snapshotSummary(snapshot) {
 }
 
 function normalizeOracle(value) {
-  const owner = String(value?.owner || "").trim();
-  const repo = String(value?.repo || "").trim();
-  const branch = String(value?.branch || "main").trim() || "main";
-  if (!owner || !repo) throw new Error("Patient Oracle owner and repository are required");
+  const owner = String(value?.owner || DEFAULT_ORACLE_COORDINATES.owner).trim() || DEFAULT_ORACLE_COORDINATES.owner;
+  const repo = String(value?.repo || DEFAULT_ORACLE_COORDINATES.repo).trim() || DEFAULT_ORACLE_COORDINATES.repo;
+  const branch = String(value?.branch || DEFAULT_ORACLE_COORDINATES.branch).trim() || DEFAULT_ORACLE_COORDINATES.branch;
   return { owner, repo, branch };
 }
 
