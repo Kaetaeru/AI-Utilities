@@ -67,19 +67,18 @@
     if (findGitHubApprovalCard()) fail("approval_pending", "A ChatGPT GitHub approval is pending; Patient Oracle will not dispatch");
     if (!Number.isFinite(checkpointMs) || !Number.isFinite(hardStopMs) || checkpointMs >= hardStopMs || hardStopMs <= Date.now()) throw new Error("Patient Oracle execution budget is invalid");
 
-    const composer = await waitForComposer(10000);
-    if (!composer) throw new Error("ChatGPT composer was not found");
+    const composer = await waitForComposer(15000);
+    if (!composer) fail("composer_missing", "ChatGPT composer was not found");
     if (readComposer(composer).trim()) fail("composer_not_empty", "ChatGPT composer is not empty; user draft is protected");
-    writeComposer(composer, prompt);
-    if (!await waitForComposerText(prompt, 1500)) throw new Error("Prompt text did not synchronize with the ChatGPT composer");
+    if (!await synchronizeComposerPrompt(prompt, 7000)) fail("composer_sync_failed", "Prompt text did not synchronize with the ChatGPT composer");
 
     arm(executionToken, responseName, checkpointMs, hardStopMs);
-    const sendButton = await waitForSendButton(4000);
+    const sendButton = await waitForSendButton(5000);
     if (sendButton) sendButton.click();
-    else dispatchEnter(composer);
-    if (!await waitForDispatchEvidence(4000)) {
+    else dispatchEnter(findComposer() || composer);
+    if (!await waitForDispatchEvidence(5000)) {
       disarm(executionToken);
-      throw new Error("Patient Oracle could not confirm prompt submission");
+      fail("dispatch_evidence_failed", "Patient Oracle could not confirm prompt submission");
     }
     dispatchConfirmedAtMs = Date.now();
   }
@@ -345,7 +344,24 @@
   }
 
   function readComposer(composer) {
-    return composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement ? composer.value || "" : composer.textContent || "";
+    if (composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement) return composer.value || "";
+    return composer.innerText || composer.textContent || "";
+  }
+
+  async function synchronizeComposerPrompt(text, timeoutMs) {
+    const started = Date.now();
+    for (let attempt = 0; attempt < 2 && Date.now() - started < timeoutMs; attempt += 1) {
+      const composer = await waitForComposer(Math.max(500, timeoutMs - (Date.now() - started)));
+      if (!composer) return false;
+      const current = normalizeText(readComposer(composer));
+      if (current) return composerContainsExpected(composer, text);
+      writeComposer(composer, text);
+      if (await waitForComposerText(text, Math.min(3000, Math.max(500, timeoutMs - (Date.now() - started))))) return true;
+      const latest = findComposer();
+      if (latest && normalizeText(readComposer(latest))) return composerContainsExpected(latest, text);
+      await sleep(350);
+    }
+    return false;
   }
 
   function writeComposer(composer, text) {
@@ -359,6 +375,12 @@
       return;
     }
     if (composer.getAttribute("contenteditable") === "true") {
+      try {
+        if (typeof document.execCommand === "function" && document.execCommand("insertText", false, text)) {
+          composer.dispatchEvent(new Event("change", { bubbles: true }));
+          return;
+        }
+      } catch {}
       composer.replaceChildren();
       const paragraph = document.createElement("p");
       paragraph.textContent = text;
@@ -370,16 +392,24 @@
   }
 
   function emitInput(composer, text) {
-    if (typeof InputEvent === "function") composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
-    else composer.dispatchEvent(new Event("input", { bubbles: true }));
+    if (typeof InputEvent === "function") {
+      try { composer.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: text })); } catch {}
+      composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+    } else composer.dispatchEvent(new Event("input", { bubbles: true }));
     composer.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function composerContainsExpected(composer, expected) {
+    const actual = normalizeText(readComposer(composer));
+    const wanted = normalizeText(expected);
+    return Boolean(actual && wanted && (actual === wanted || actual.includes(wanted)));
   }
 
   async function waitForComposerText(expected, timeoutMs) {
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
       const composer = findComposer();
-      if (composer && readComposer(composer).trim().includes(expected.trim())) return true;
+      if (composer && composerContainsExpected(composer, expected)) return true;
       await sleep(100);
     }
     return false;
