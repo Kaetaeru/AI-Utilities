@@ -19,6 +19,7 @@ label { display:grid; gap:8px; margin-top:14px; color:#bdc6d0; font-size:13px; f
 input,textarea { width:100%; border:1px solid #313b46; border-radius:10px; background:#0d1116; color:#eef2f6; padding:11px 12px; outline:none; }
 input:focus,textarea:focus { border-color:#7d8e9f; box-shadow:0 0 0 3px rgba(125,142,159,.15); }
 textarea { resize:vertical; line-height:1.45; }.code,pre,code { font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace; }
+.hint { margin:16px 0 0; color:var(--muted); font-size:12px; line-height:1.55; }
 .file-row { margin-bottom:12px; }
 button { border:1px solid #394451; color:#dbe2ea; background:#192029; border-radius:10px; padding:11px 16px; cursor:pointer; font-weight:800; }
 button:hover { background:#202934; } button.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-ink); } button:disabled { opacity:.5; cursor:not-allowed; }
