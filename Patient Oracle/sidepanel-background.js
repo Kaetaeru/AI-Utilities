@@ -1,5 +1,6 @@
 import "./background.js";
 import "./server-mode.js";
+import "./server-resilience.js";
 
 async function enableActionSidePanel() {
   try {
