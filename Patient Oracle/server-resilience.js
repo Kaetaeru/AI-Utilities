@@ -13,7 +13,6 @@ chrome.runtime.onStartup.addListener(() => { void enforceConfiguredWorker("chrom
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (changes[SERVER_CONFIG_KEY]?.newValue?.enabled) void enforceConfiguredWorker("server_config_enabled");
-  if (changes[USER_INTENT_KEY]?.newValue?.started === true) void enforceConfiguredWorker("user_started");
   for (const [key, change] of Object.entries(changes)) {
     if (!key.startsWith("patientOracleState:")) continue;
     const tabId = Number(key.slice("patientOracleState:".length));
